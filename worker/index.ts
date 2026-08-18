@@ -41,6 +41,7 @@ type PresenceRow = {
   room_id: string;
   client_id: string;
   name: string;
+  avatar_url?: string;
   mic_on: number;
   camera_on: number;
   screen_on: number;
@@ -57,6 +58,18 @@ type ChannelRow = {
   updated_at: number;
 };
 
+type UserRow = {
+  id: string;
+  username: string;
+  display_name: string;
+  avatar_url: string;
+  password_hash: string;
+  salt: string;
+  session_token: string | null;
+  created_at: number;
+  updated_at: number;
+};
+
 type LocalStore = {
   nextMessageId: number;
   nextSignalId: number;
@@ -64,6 +77,7 @@ type LocalStore = {
   signals: SignalRow[];
   presences: PresenceRow[];
   channels: ChannelRow[];
+  users: UserRow[];
 };
 
 const jsonHeaders = {
@@ -88,6 +102,7 @@ const emptyStore = (): LocalStore => ({
   signals: [],
   presences: [],
   channels: [],
+  users: [],
 });
 
 async function readLocalStore(): Promise<LocalStore> {
@@ -129,7 +144,57 @@ async function writeLocalStore(store: LocalStore) {
 function normalizeStore(store: LocalStore): LocalStore {
   store.presences ??= [];
   store.channels ??= [];
+  store.users ??= [];
   return store;
+}
+
+function toUser(row: UserRow) {
+  return {
+    id: row.id,
+    username: row.username,
+    displayName: row.display_name,
+    avatarUrl: row.avatar_url,
+  };
+}
+
+function cleanUsername(value: unknown) {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  return value.trim().toLowerCase().replace(/[^a-z0-9_.-]/g, "").slice(0, 32);
+}
+
+async function hashPassword(password: string, salt: string) {
+  const bytes = new TextEncoder().encode(`${salt}:${password}`);
+  const hash = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(hash)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function makeToken(prefix: string) {
+  return `${prefix}-${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
+function cleanAvatar(value: unknown) {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  const clean = value.trim();
+  if (!clean) {
+    return "";
+  }
+
+  if (!clean.startsWith("data:image/") && !clean.startsWith("https://") && !clean.startsWith("http://")) {
+    return "";
+  }
+
+  return clean.slice(0, 350000);
+}
+
+async function validateLocalSession(store: LocalStore, userId: string, token: string) {
+  const user = store.users.find((row) => row.id === userId && row.session_token === token);
+  return user ?? null;
 }
 
 function defaultChannels(serverId: string): ChannelRow[] {
@@ -265,6 +330,96 @@ async function handleLocalChannels(request: Request) {
   return json({ error: "Metodo nao permitido." }, 405);
 }
 
+async function handleLocalAuth(request: Request) {
+  const url = new URL(request.url);
+  const store = await readLocalStore();
+
+  if (request.method === "GET" && url.pathname === "/api/auth/me") {
+    const userId = cleanText(url.searchParams.get("userId"), "", 80);
+    const token = cleanText(url.searchParams.get("token"), "", 160);
+    const user = await validateLocalSession(store, userId, token);
+
+    if (!user) {
+      return json({ error: "Sessao invalida." }, 401);
+    }
+
+    return json({ user: toUser(user) });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/auth/register") {
+    const body = (await request.json()) as Record<string, unknown>;
+    const username = cleanUsername(body.username);
+    const password = typeof body.password === "string" ? body.password : "";
+    const displayName = cleanText(body.displayName, username || "Amigo", 48);
+    const avatarUrl = cleanAvatar(body.avatarUrl);
+
+    if (username.length < 3 || password.length < 4) {
+      return json({ error: "Informe usuario com 3 caracteres e senha com 4 ou mais." }, 400);
+    }
+
+    if (store.users.some((user) => user.username === username)) {
+      return json({ error: "Usuario ja existe." }, 409);
+    }
+
+    const now = Date.now();
+    const salt = makeToken("sal");
+    const token = makeToken("sessao");
+    const row: UserRow = {
+      id: makeToken("user").slice(0, 24),
+      username,
+      display_name: displayName,
+      avatar_url: avatarUrl,
+      password_hash: await hashPassword(password, salt),
+      salt,
+      session_token: token,
+      created_at: now,
+      updated_at: now,
+    };
+
+    store.users.push(row);
+    await writeLocalStore(store);
+
+    return json({ user: toUser(row), token }, 201);
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/auth/login") {
+    const body = (await request.json()) as Record<string, unknown>;
+    const username = cleanUsername(body.username);
+    const password = typeof body.password === "string" ? body.password : "";
+    const user = store.users.find((row) => row.username === username);
+
+    if (!user || user.password_hash !== await hashPassword(password, user.salt)) {
+      return json({ error: "Usuario ou senha invalidos." }, 401);
+    }
+
+    user.session_token = makeToken("sessao");
+    user.updated_at = Date.now();
+    await writeLocalStore(store);
+
+    return json({ user: toUser(user), token: user.session_token });
+  }
+
+  if (request.method === "PATCH" && url.pathname === "/api/auth/profile") {
+    const body = (await request.json()) as Record<string, unknown>;
+    const userId = cleanText(body.userId, "", 80);
+    const token = cleanText(body.token, "", 160);
+    const user = await validateLocalSession(store, userId, token);
+
+    if (!user) {
+      return json({ error: "Sessao invalida." }, 401);
+    }
+
+    user.display_name = cleanText(body.displayName, user.display_name, 48);
+    user.avatar_url = cleanAvatar(body.avatarUrl);
+    user.updated_at = Date.now();
+    await writeLocalStore(store);
+
+    return json({ user: toUser(user) });
+  }
+
+  return json({ error: "Metodo nao permitido." }, 405);
+}
+
 async function handleLocalMessages(request: Request) {
   const url = new URL(request.url);
   const store = await readLocalStore();
@@ -370,6 +525,7 @@ function toPresence(row: PresenceRow) {
     roomId: row.room_id,
     clientId: row.client_id,
     name: row.name,
+    avatarUrl: row.avatar_url ?? "",
     micOn: Boolean(row.mic_on),
     cameraOn: Boolean(row.camera_on),
     screenOn: Boolean(row.screen_on),
@@ -400,10 +556,12 @@ async function handleLocalPresence(request: Request) {
     const roomId = cleanText(body.roomId, "sala-amigos", 120);
     const clientId = cleanText(body.clientId, "pessoa", 80);
     const name = cleanText(body.name, "Amigo", 48);
+    const avatarUrl = cleanAvatar(body.avatarUrl);
     const nextPresence: PresenceRow = {
       room_id: roomId,
       client_id: clientId,
       name,
+      avatar_url: avatarUrl,
       mic_on: body.micOn === false ? 0 : 1,
       camera_on: body.cameraOn === true ? 1 : 0,
       screen_on: body.screenOn === true ? 1 : 0,
@@ -459,6 +617,7 @@ async function ensureSchema(db: D1Database) {
       room_id TEXT NOT NULL,
       client_id TEXT NOT NULL,
       name TEXT NOT NULL,
+      avatar_url TEXT NOT NULL DEFAULT '',
       mic_on INTEGER NOT NULL,
       camera_on INTEGER NOT NULL,
       screen_on INTEGER NOT NULL,
@@ -479,7 +638,26 @@ async function ensureSchema(db: D1Database) {
     )`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_server_channels_server_type
       ON server_channels(server_id, type, order_index)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      username TEXT NOT NULL UNIQUE,
+      display_name TEXT NOT NULL,
+      avatar_url TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      salt TEXT NOT NULL,
+      session_token TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_users_session
+      ON users(id, session_token)`),
   ]);
+
+  try {
+    await db.prepare(`ALTER TABLE voice_presence ADD COLUMN avatar_url TEXT NOT NULL DEFAULT ''`).run();
+  } catch {
+    // Existing databases already have the profile avatar column.
+  }
 }
 
 function json(data: unknown, status = 200) {
@@ -704,6 +882,139 @@ async function handleChannels(request: Request, env?: Env) {
   return json({ error: "Metodo nao permitido." }, 405);
 }
 
+async function validateSession(db: D1Database, userId: string, token: string) {
+  if (!userId || !token) {
+    return null;
+  }
+
+  return db.prepare(
+    `SELECT id, username, display_name, avatar_url, password_hash, salt, session_token, created_at, updated_at
+     FROM users
+     WHERE id = ? AND session_token = ?`,
+  )
+    .bind(userId, token)
+    .first<UserRow>();
+}
+
+async function handleAuth(request: Request, env?: Env) {
+  if (!env?.DB) {
+    return handleLocalAuth(request);
+  }
+
+  await ensureSchema(env.DB);
+  const url = new URL(request.url);
+
+  if (request.method === "GET" && url.pathname === "/api/auth/me") {
+    const userId = cleanText(url.searchParams.get("userId"), "", 80);
+    const token = cleanText(url.searchParams.get("token"), "", 160);
+    const user = await validateSession(env.DB, userId, token);
+
+    if (!user) {
+      return json({ error: "Sessao invalida." }, 401);
+    }
+
+    return json({ user: toUser(user) });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/auth/register") {
+    const body = (await request.json()) as Record<string, unknown>;
+    const username = cleanUsername(body.username);
+    const password = typeof body.password === "string" ? body.password : "";
+    const displayName = cleanText(body.displayName, username || "Amigo", 48);
+    const avatarUrl = cleanAvatar(body.avatarUrl);
+
+    if (username.length < 3 || password.length < 4) {
+      return json({ error: "Informe usuario com 3 caracteres e senha com 4 ou mais." }, 400);
+    }
+
+    const existing = await env.DB.prepare(`SELECT id FROM users WHERE username = ?`).bind(username).first<{ id: string }>();
+    if (existing) {
+      return json({ error: "Usuario ja existe." }, 409);
+    }
+
+    const now = Date.now();
+    const salt = makeToken("sal");
+    const token = makeToken("sessao");
+    const row: UserRow = {
+      id: makeToken("user").slice(0, 24),
+      username,
+      display_name: displayName,
+      avatar_url: avatarUrl,
+      password_hash: await hashPassword(password, salt),
+      salt,
+      session_token: token,
+      created_at: now,
+      updated_at: now,
+    };
+
+    await env.DB.prepare(
+      `INSERT INTO users (id, username, display_name, avatar_url, password_hash, salt, session_token, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(row.id, row.username, row.display_name, row.avatar_url, row.password_hash, row.salt, row.session_token, row.created_at, row.updated_at)
+      .run();
+
+    return json({ user: toUser(row), token }, 201);
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/auth/login") {
+    const body = (await request.json()) as Record<string, unknown>;
+    const username = cleanUsername(body.username);
+    const password = typeof body.password === "string" ? body.password : "";
+    const user = await env.DB.prepare(
+      `SELECT id, username, display_name, avatar_url, password_hash, salt, session_token, created_at, updated_at
+       FROM users
+       WHERE username = ?`,
+    )
+      .bind(username)
+      .first<UserRow>();
+
+    if (!user || user.password_hash !== await hashPassword(password, user.salt)) {
+      return json({ error: "Usuario ou senha invalidos." }, 401);
+    }
+
+    const token = makeToken("sessao");
+    const now = Date.now();
+    await env.DB.prepare(`UPDATE users SET session_token = ?, updated_at = ? WHERE id = ?`)
+      .bind(token, now, user.id)
+      .run();
+
+    user.session_token = token;
+    user.updated_at = now;
+
+    return json({ user: toUser(user), token });
+  }
+
+  if (request.method === "PATCH" && url.pathname === "/api/auth/profile") {
+    const body = (await request.json()) as Record<string, unknown>;
+    const userId = cleanText(body.userId, "", 80);
+    const token = cleanText(body.token, "", 160);
+    const user = await validateSession(env.DB, userId, token);
+
+    if (!user) {
+      return json({ error: "Sessao invalida." }, 401);
+    }
+
+    const displayName = cleanText(body.displayName, user.display_name, 48);
+    const avatarUrl = cleanAvatar(body.avatarUrl);
+    const now = Date.now();
+    await env.DB.prepare(`UPDATE users SET display_name = ?, avatar_url = ?, updated_at = ? WHERE id = ?`)
+      .bind(displayName, avatarUrl, now, user.id)
+      .run();
+
+    return json({
+      user: toUser({
+        ...user,
+        display_name: displayName,
+        avatar_url: avatarUrl,
+        updated_at: now,
+      }),
+    });
+  }
+
+  return json({ error: "Metodo nao permitido." }, 405);
+}
+
 async function handleSignals(request: Request, env?: Env) {
   if (!env?.DB) {
     return handleLocalSignals(request);
@@ -781,7 +1092,7 @@ async function handlePresence(request: Request, env?: Env) {
     const roomId = cleanText(url.searchParams.get("roomId"), "sala-amigos", 120);
     await env.DB.prepare(`DELETE FROM voice_presence WHERE last_seen < ?`).bind(now - PRESENCE_TTL_MS).run();
     const result = await env.DB.prepare(
-      `SELECT room_id, client_id, name, mic_on, camera_on, screen_on, last_seen
+      `SELECT room_id, client_id, name, avatar_url, mic_on, camera_on, screen_on, last_seen
        FROM voice_presence
        WHERE room_id = ?
        ORDER BY name ASC, client_id ASC`,
@@ -797,21 +1108,23 @@ async function handlePresence(request: Request, env?: Env) {
     const roomId = cleanText(body.roomId, "sala-amigos", 120);
     const clientId = cleanText(body.clientId, "pessoa", 80);
     const name = cleanText(body.name, "Amigo", 48);
+    const avatarUrl = cleanAvatar(body.avatarUrl);
     const micOn = body.micOn === false ? 0 : 1;
     const cameraOn = body.cameraOn === true ? 1 : 0;
     const screenOn = body.screenOn === true ? 1 : 0;
 
     await env.DB.prepare(
-      `INSERT INTO voice_presence (room_id, client_id, name, mic_on, camera_on, screen_on, last_seen)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO voice_presence (room_id, client_id, name, avatar_url, mic_on, camera_on, screen_on, last_seen)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(room_id, client_id) DO UPDATE SET
          name = excluded.name,
+         avatar_url = excluded.avatar_url,
          mic_on = excluded.mic_on,
          camera_on = excluded.camera_on,
          screen_on = excluded.screen_on,
          last_seen = excluded.last_seen`,
     )
-      .bind(roomId, clientId, name, micOn, cameraOn, screenOn, now)
+      .bind(roomId, clientId, name, avatarUrl, micOn, cameraOn, screenOn, now)
       .run();
 
     return json({
@@ -820,6 +1133,7 @@ async function handlePresence(request: Request, env?: Env) {
         room_id: roomId,
         client_id: clientId,
         name,
+        avatar_url: avatarUrl,
         mic_on: micOn,
         camera_on: cameraOn,
         screen_on: screenOn,
@@ -850,6 +1164,10 @@ const worker = {
 
     if (url.pathname === "/api/channels") {
       return handleChannels(request, env);
+    }
+
+    if (url.pathname.startsWith("/api/auth/")) {
+      return handleAuth(request, env);
     }
 
     if (url.pathname === "/api/signals") {

@@ -38,12 +38,7 @@ test("server-renders the video room shell", async () => {
 
   const html = await response.text();
   assert.match(html, /Sharetalk/i);
-  assert.match(html, /Infernus/i);
-  assert.match(html, /Chamada de video/i);
-  assert.match(html, /Canais de texto/i);
-  assert.match(html, /Canais de voz/i);
-  assert.match(html, /Entrar no canal/i);
-  assert.match(html, /Chat persistente/i);
+  assert.match(html, /Carregando/i);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
 });
 
@@ -164,6 +159,79 @@ test("can manage local server channels when D1 is unavailable", async () => {
     );
     const payload = await loaded.json();
     assert.equal(payload.channels.some((channel) => channel.name === "Filmes"), false);
+  } finally {
+    delete process.env.SHARETALK_DATA_FILE;
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("can register, login and update a local profile", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "sharetalk-auth-"));
+  process.env.SHARETALK_DATA_FILE = join(dataDir, "store.json");
+
+  try {
+    const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+    workerUrl.searchParams.set("auth", `${process.pid}-${Date.now()}`);
+    const { default: worker } = await import(workerUrl.href);
+    const ctx = {
+      waitUntil() {},
+      passThroughOnException() {},
+    };
+
+    const registered = await worker.fetch(
+      new Request("http://localhost/api/auth/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          username: "lucas",
+          password: "1234",
+          displayName: "Lucas",
+          avatarUrl: "data:image/png;base64,AAAA",
+        }),
+      }),
+      undefined,
+      ctx,
+    );
+
+    assert.equal(registered.status, 201);
+    const registerPayload = await registered.json();
+    assert.equal(registerPayload.user.username, "lucas");
+
+    const logged = await worker.fetch(
+      new Request("http://localhost/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          username: "lucas",
+          password: "1234",
+        }),
+      }),
+      undefined,
+      ctx,
+    );
+
+    assert.equal(logged.status, 200);
+    const loginPayload = await logged.json();
+
+    const updated = await worker.fetch(
+      new Request("http://localhost/api/auth/profile", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          userId: loginPayload.user.id,
+          token: loginPayload.token,
+          displayName: "Lucas MG",
+          avatarUrl: "data:image/png;base64,BBBB",
+        }),
+      }),
+      undefined,
+      ctx,
+    );
+
+    assert.equal(updated.status, 200);
+    const updatedPayload = await updated.json();
+    assert.equal(updatedPayload.user.displayName, "Lucas MG");
+    assert.equal(updatedPayload.user.avatarUrl, "data:image/png;base64,BBBB");
   } finally {
     delete process.env.SHARETALK_DATA_FILE;
     await rm(dataDir, { recursive: true, force: true });

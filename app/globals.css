@@ -102,6 +102,68 @@ p {
   margin-top: 0;
 }
 
+.auth-shell {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+  background:
+    linear-gradient(140deg, rgba(88, 101, 242, 0.22), transparent 34%),
+    linear-gradient(320deg, rgba(32, 184, 158, 0.18), transparent 32%),
+    #151820;
+}
+
+.auth-card {
+  display: grid;
+  gap: 18px;
+  width: min(100%, 430px);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 22px;
+  background: #20242c;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.auth-brand span {
+  color: var(--accent);
+  font-size: 0.76rem;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.auth-brand h1 {
+  margin: 0;
+}
+
+.auth-form {
+  display: grid;
+  gap: 9px;
+}
+
+.auth-form label,
+.profile-form label {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.auth-error {
+  margin: 0;
+  color: #ffadad;
+  font-size: 0.88rem;
+}
+
+.auth-switch {
+  background: transparent;
+  color: #cfd7df;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 72px 240px minmax(0, 1fr) 390px;
@@ -302,7 +364,8 @@ p {
   color: #c8d0d6;
 }
 
-.voice-participant span {
+.profile-avatar,
+.voice-participant > .profile-avatar {
   display: grid;
   place-items: center;
   width: 20px;
@@ -313,6 +376,13 @@ p {
   color: #fff;
   font-size: 0.72rem;
   font-weight: 800;
+  overflow: hidden;
+}
+
+.profile-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .voice-participant-body {
@@ -961,15 +1031,68 @@ h1 {
   box-shadow: 0 0 0 4px rgba(226, 84, 84, 0.14);
 }
 
-.room-form {
+.profile-card {
   display: grid;
-  gap: 7px;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: #242935;
 }
 
-.room-form label {
+.profile-summary {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.profile-summary .profile-avatar,
+.avatar-edit-row .profile-avatar {
+  width: 42px;
+  height: 42px;
+  font-size: 1rem;
+}
+
+.profile-summary strong,
+.profile-summary span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-summary span {
   color: var(--muted);
-  font-size: 0.84rem;
-  font-weight: 700;
+  font-size: 0.82rem;
+}
+
+.profile-summary button {
+  min-height: 34px;
+}
+
+.profile-form {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.avatar-edit-row {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.avatar-edit-row input {
+  padding: 8px;
+}
+
+.profile-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .inline-fields {

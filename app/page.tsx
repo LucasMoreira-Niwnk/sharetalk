@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, MouseEvent, useCallback, useEffect, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, MouseEvent, useCallback, useEffect, useRef, useState } from "react";
 
 type ChatMessage = {
   id: number;
@@ -24,6 +24,7 @@ type SignalMessage = {
 type RemotePeer = {
   id: string;
   name: string;
+  avatarUrl: string;
   connectionId: string;
   stream: MediaStream | null;
   voiceStream: MediaStream | null;
@@ -37,6 +38,7 @@ type PresenceParticipant = {
   roomId: string;
   clientId: string;
   name: string;
+  avatarUrl: string;
   micOn: boolean;
   cameraOn: boolean;
   screenOn: boolean;
@@ -59,6 +61,18 @@ type ServerChannel = {
   updatedAt: number;
 };
 
+type UserProfile = {
+  id: string;
+  username: string;
+  displayName: string;
+  avatarUrl: string;
+};
+
+type StoredSession = {
+  userId: string;
+  token: string;
+};
+
 const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
 const APP_NAME = "Sharetalk";
 const DEFAULT_SERVER = "infernus";
@@ -75,6 +89,7 @@ const DEFAULT_VOICE_CHANNELS: ServerChannel[] = [
 ];
 const CLIENT_STORAGE_KEY = "papo-client-id";
 const ACTIVE_VOICE_STORAGE_KEY = "papo-voz-ativa";
+const AUTH_STORAGE_KEY = "sharetalk-session";
 
 function makeId(prefix: string) {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -98,6 +113,28 @@ function readActiveVoice() {
     window.sessionStorage.removeItem(ACTIVE_VOICE_STORAGE_KEY);
     return null;
   }
+}
+
+function readStoredSession() {
+  try {
+    return JSON.parse(window.localStorage.getItem(AUTH_STORAGE_KEY) ?? "null") as StoredSession | null;
+  } catch {
+    window.localStorage.removeItem(AUTH_STORAGE_KEY);
+    return null;
+  }
+}
+
+function avatarInitial(name: string) {
+  return (name.trim()[0] || "A").toUpperCase();
+}
+
+function readImageFile(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
 }
 
 function serverPath(serverId: string) {
@@ -127,6 +164,17 @@ export default function Home() {
   const [voiceChannels, setVoiceChannels] = useState<ServerChannel[]>(DEFAULT_VOICE_CHANNELS);
   const [selectedTextChannel, setSelectedTextChannel] = useState(DEFAULT_TEXT_CHANNELS[0].id);
   const [selectedVoiceChannel, setSelectedVoiceChannel] = useState(DEFAULT_VOICE_CHANNELS[0].id);
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  const [authToken, setAuthToken] = useState("");
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authUsername, setAuthUsername] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authDisplayName, setAuthDisplayName] = useState("");
+  const [authAvatarUrl, setAuthAvatarUrl] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileName, setProfileName] = useState("");
+  const [profileAvatarUrl, setProfileAvatarUrl] = useState("");
   const [clientId, setClientId] = useState("");
   const [connectionId, setConnectionId] = useState("");
   const [name, setName] = useState("");
@@ -180,6 +228,7 @@ export default function Home() {
   }, [serverId]);
 
   useEffect(() => {
+    let cancelled = false;
     const current = new URL(window.location.href);
     const targetPath = serverPath(DEFAULT_SERVER);
 
@@ -187,17 +236,11 @@ export default function Home() {
       window.history.replaceState(null, "", targetPath);
     }
 
-    const storedName = window.localStorage.getItem("papo-nome") ?? "";
-    const storedClientId = window.sessionStorage.getItem(CLIENT_STORAGE_KEY) || makeId("pessoa");
     const storedVoice = readActiveVoice();
-    window.sessionStorage.setItem(CLIENT_STORAGE_KEY, storedClientId);
-    setClientId(storedClientId);
     setConnectionId(makeId("conexao"));
     if (storedVoice?.serverId === DEFAULT_SERVER && storedVoice.channelId) {
       setSelectedVoiceChannel(storedVoice.channelId);
     }
-    setName(storedName);
-    setDraftName(storedName);
     if (!window.isSecureContext) {
       setMediaAccessStatus("insecure");
       setMediaAccessMessage("Camera e microfone so funcionam em HTTPS ou localhost.");
@@ -205,7 +248,43 @@ export default function Home() {
       setMediaAccessStatus("unsupported");
       setMediaAccessMessage("Este navegador nao disponibilizou camera e microfone para esta pagina.");
     }
-    setIsReady(true);
+
+    async function restoreSession() {
+      const storedSession = readStoredSession();
+
+      if (!storedSession?.userId || !storedSession.token) {
+        return;
+      }
+
+      try {
+        const result = await api<{ user: UserProfile }>(
+          `/api/auth/me?userId=${encodeURIComponent(storedSession.userId)}&token=${encodeURIComponent(storedSession.token)}`,
+        );
+        if (cancelled) {
+          return;
+        }
+        setCurrentUser(result.user);
+        setAuthToken(storedSession.token);
+        setClientId(result.user.id);
+        window.sessionStorage.setItem(CLIENT_STORAGE_KEY, result.user.id);
+        setName(result.user.displayName);
+        setDraftName(result.user.displayName);
+        setProfileName(result.user.displayName);
+        setProfileAvatarUrl(result.user.avatarUrl);
+      } catch {
+        window.localStorage.removeItem(AUTH_STORAGE_KEY);
+      }
+    }
+
+    restoreSession().finally(() => {
+      if (!cancelled) {
+        setIsReady(true);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -309,12 +388,13 @@ export default function Home() {
         roomId: voiceRoomKey,
         clientId,
         name: overrideName || name || "Amigo",
+        avatarUrl: currentUser?.avatarUrl ?? "",
         micOn: stream.getAudioTracks().some((track) => track.enabled),
         cameraOn: stream.getVideoTracks().some((track) => track.enabled),
         screenOn: Boolean(screenStreamRef.current),
       }),
     });
-  }, [clientId, name, voiceRoomKey]);
+  }, [clientId, currentUser?.avatarUrl, name, voiceRoomKey]);
 
   const leavePresence = useCallback(async () => {
     if (!clientId) {
@@ -350,12 +430,13 @@ export default function Home() {
       await postSignal("offer", {
         description: offer,
         name: name || "Amigo",
+        avatarUrl: currentUser?.avatarUrl ?? "",
         micOn,
         cameraOn,
         screenOn: Boolean(screenStreamRef.current),
       }, peerId);
     },
-    [cameraOn, micOn, name, postSignal],
+    [cameraOn, currentUser?.avatarUrl, micOn, name, postSignal],
   );
 
   const addLocalTracksToPeer = useCallback((peer: RTCPeerConnection) => {
@@ -404,7 +485,7 @@ export default function Home() {
         if (items.some((item) => item.id === peerId)) {
           return items;
         }
-        return [...items, { id: peerId, name: peerName, connectionId: peerConnectionId, stream: null, voiceStream: null, screenAudioStream: null, micOn: false, cameraOn: false, screenOn: false }];
+        return [...items, { id: peerId, name: peerName, avatarUrl: "", connectionId: peerConnectionId, stream: null, voiceStream: null, screenAudioStream: null, micOn: false, cameraOn: false, screenOn: false }];
       });
 
       addLocalTracksToPeer(peer);
@@ -454,6 +535,7 @@ export default function Home() {
               voiceStream: nextVoiceStream,
               screenAudioStream: nextScreenAudioStream,
               name: peerName,
+              avatarUrl: typeof event.streams[0]?.id === "string" ? item.avatarUrl : item.avatarUrl,
               connectionId: peerConnectionId || item.connectionId,
             };
           }),
@@ -763,6 +845,7 @@ export default function Home() {
     });
     await postSignal("join", {
       name: name || "Amigo",
+      avatarUrl: currentUser?.avatarUrl ?? "",
       micOn: stream.getAudioTracks().some((track) => track.enabled),
       cameraOn: stream.getVideoTracks().some((track) => track.enabled),
       screenOn: Boolean(screenStreamRef.current),
@@ -770,7 +853,7 @@ export default function Home() {
     window.sessionStorage.setItem(ACTIVE_VOICE_STORAGE_KEY, JSON.stringify({ serverId, channelId: selectedVoiceChannel }));
     await postPresence();
     setStatus(`Conectado ao canal de voz ${currentVoiceChannel.name}.`);
-  }, [currentVoiceChannel.name, ensureMedia, name, postPresence, postSignal, renegotiatePeer, selectedVoiceChannel, serverId, syncSignalCursor]);
+  }, [currentUser?.avatarUrl, currentVoiceChannel.name, ensureMedia, name, postPresence, postSignal, renegotiatePeer, selectedVoiceChannel, serverId, syncSignalCursor]);
 
   useEffect(() => {
     if (!isReady || !clientId || localStream || autoJoinAttemptedRef.current) {
@@ -798,9 +881,11 @@ export default function Home() {
 
       knownSignalsRef.current.add(signal.id);
       const peerName = typeof signal.payload.name === "string" ? signal.payload.name : "Amigo";
+      const peerAvatarUrl = typeof signal.payload.avatarUrl === "string" ? signal.payload.avatarUrl : "";
       const signalConnectionId = typeof signal.payload.connectionId === "string" ? signal.payload.connectionId : "";
       const mediaState = {
         name: peerName,
+        avatarUrl: peerAvatarUrl,
         micOn: asBoolean(signal.payload.micOn, true),
         cameraOn: asBoolean(signal.payload.cameraOn),
         screenOn: asBoolean(signal.payload.screenOn),
@@ -850,6 +935,7 @@ export default function Home() {
             {
               description: offer,
               name: name || "Amigo",
+              avatarUrl: currentUser?.avatarUrl ?? "",
               micOn,
               cameraOn,
               screenOn: Boolean(screenStreamRef.current),
@@ -875,6 +961,7 @@ export default function Home() {
           {
             description: answer,
             name: name || "Amigo",
+            avatarUrl: currentUser?.avatarUrl ?? "",
             micOn,
             cameraOn,
             screenOn: Boolean(screenStreamRef.current),
@@ -900,7 +987,7 @@ export default function Home() {
         }
       }
     },
-    [cameraOn, clientId, createPeer, micOn, name, postSignal],
+    [cameraOn, clientId, createPeer, currentUser?.avatarUrl, micOn, name, postSignal],
   );
 
   useEffect(() => {
@@ -995,9 +1082,10 @@ export default function Home() {
               const presence = result.participants.find((participant) => participant.clientId === peer.id);
               return presence
                 ? {
-                    ...peer,
-                    name: presence.name,
-                    micOn: presence.micOn,
+                  ...peer,
+                  name: presence.name,
+                  avatarUrl: presence.avatarUrl,
+                  micOn: presence.micOn,
                     cameraOn: presence.cameraOn,
                     screenOn: presence.screenOn,
                   }
@@ -1026,6 +1114,7 @@ export default function Home() {
                 "join",
                 {
                   name: name || "Amigo",
+                  avatarUrl: currentUser?.avatarUrl ?? "",
                   micOn,
                   cameraOn,
                   screenOn: Boolean(screenStreamRef.current),
@@ -1048,7 +1137,7 @@ export default function Home() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [cameraOn, clientId, isReady, micOn, name, postSignal, voiceRoomKey]);
+  }, [cameraOn, clientId, currentUser?.avatarUrl, isReady, micOn, name, postSignal, voiceRoomKey]);
 
   useEffect(() => {
     if (!localStream || !clientId) {
@@ -1075,18 +1164,52 @@ export default function Home() {
     };
   }, []);
 
-  async function saveName(event: FormEvent) {
+  async function saveProfile(event: FormEvent) {
     event.preventDefault();
-    const cleanName = draftName.trim() || "Amigo";
-    window.localStorage.setItem("papo-nome", cleanName);
-    setName(cleanName);
+    if (!currentUser || !authToken) {
+      return;
+    }
+
+    const cleanName = profileName.trim() || currentUser.displayName || "Amigo";
+    const result = await api<{ user: UserProfile }>("/api/auth/profile", {
+      method: "PATCH",
+      body: JSON.stringify({
+        userId: currentUser.id,
+        token: authToken,
+        displayName: cleanName,
+        avatarUrl: profileAvatarUrl,
+      }),
+    });
+    setCurrentUser(result.user);
+    setName(result.user.displayName);
+    setDraftName(result.user.displayName);
+    setProfileName(result.user.displayName);
+    setProfileAvatarUrl(result.user.avatarUrl);
+    setProfileOpen(false);
     await postSignal("state", {
-      name: cleanName,
+      name: result.user.displayName,
+      avatarUrl: result.user.avatarUrl,
       micOn,
       cameraOn,
       screenOn: Boolean(screenStreamRef.current),
     });
-    await postPresence(cleanName);
+    await postPresence(result.user.displayName);
+    setStatus("Perfil atualizado.");
+  }
+
+  async function handleProfileAvatarChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    if (!file.type.startsWith("image/")) {
+      setError("Escolha uma imagem para a foto de perfil.");
+      return;
+    }
+
+    const dataUrl = await readImageFile(file);
+    setProfileAvatarUrl(dataUrl);
   }
 
   async function sendMessage(event: FormEvent) {
@@ -1118,6 +1241,7 @@ export default function Home() {
     setMicOn(audioTrack.enabled);
     postSignal("state", {
       name: name || "Amigo",
+      avatarUrl: currentUser?.avatarUrl ?? "",
       micOn: audioTrack.enabled,
       cameraOn,
       screenOn: Boolean(screenStreamRef.current),
@@ -1154,6 +1278,7 @@ export default function Home() {
         await refreshDevices();
         postSignal("state", {
           name: name || "Amigo",
+          avatarUrl: currentUser?.avatarUrl ?? "",
           micOn,
           cameraOn: true,
           screenOn: Boolean(screenStreamRef.current),
@@ -1170,6 +1295,7 @@ export default function Home() {
     setCameraOn(videoTrack.enabled);
     postSignal("state", {
       name: name || "Amigo",
+      avatarUrl: currentUser?.avatarUrl ?? "",
       micOn,
       cameraOn: videoTrack.enabled,
       screenOn: Boolean(screenStreamRef.current),
@@ -1178,7 +1304,7 @@ export default function Home() {
   }
 
   function disconnectCall() {
-    postSignal("leave", { name: name || "Amigo" }).catch(() => undefined);
+    postSignal("leave", { name: name || "Amigo", avatarUrl: currentUser?.avatarUrl ?? "" }).catch(() => undefined);
     leavePresence().catch(() => undefined);
     window.sessionStorage.removeItem(ACTIVE_VOICE_STORAGE_KEY);
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -1223,6 +1349,7 @@ export default function Home() {
       setScreenStream(null);
       postSignal("state", {
         name: name || "Amigo",
+        avatarUrl: currentUser?.avatarUrl ?? "",
         micOn,
         cameraOn: Boolean(cameraTrack && cameraTrack.enabled),
         screenOn: false,
@@ -1248,6 +1375,7 @@ export default function Home() {
         setScreenStream(null);
         postSignal("state", {
           name: name || "Amigo",
+          avatarUrl: currentUser?.avatarUrl ?? "",
           micOn,
           cameraOn: Boolean(localStreamRef.current?.getVideoTracks()[0]?.enabled),
           screenOn: false,
@@ -1258,6 +1386,7 @@ export default function Home() {
       setScreenStream(stream);
       postSignal("state", {
         name: name || "Amigo",
+        avatarUrl: currentUser?.avatarUrl ?? "",
         micOn,
         cameraOn: true,
         screenOn: true,
@@ -1280,7 +1409,7 @@ export default function Home() {
       return;
     }
 
-    postSignal("leave", { name: name || "Amigo" }).catch(() => undefined);
+    postSignal("leave", { name: name || "Amigo", avatarUrl: currentUser?.avatarUrl ?? "" }).catch(() => undefined);
     leavePresence().catch(() => undefined);
     peersRef.current.forEach((peer) => peer.close());
     peersRef.current.clear();
@@ -1374,6 +1503,66 @@ export default function Home() {
     }
   }
 
+  async function handleAuthSubmit(event: FormEvent) {
+    event.preventDefault();
+    setAuthError("");
+
+    try {
+      const path = authMode === "register" ? "/api/auth/register" : "/api/auth/login";
+      const result = await api<{ user: UserProfile; token: string }>(path, {
+        method: "POST",
+        body: JSON.stringify({
+          username: authUsername,
+          password: authPassword,
+          displayName: authDisplayName || authUsername,
+          avatarUrl: authAvatarUrl,
+        }),
+      });
+
+      window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ userId: result.user.id, token: result.token }));
+      window.sessionStorage.setItem(CLIENT_STORAGE_KEY, result.user.id);
+      setCurrentUser(result.user);
+      setAuthToken(result.token);
+      setClientId(result.user.id);
+      setName(result.user.displayName);
+      setDraftName(result.user.displayName);
+      setProfileName(result.user.displayName);
+      setProfileAvatarUrl(result.user.avatarUrl);
+      setAuthPassword("");
+      setStatus(`Bem-vindo ao ${SERVER_DISPLAY_NAME}.`);
+    } catch {
+      setAuthError(authMode === "register" ? "Nao consegui criar essa conta." : "Usuario ou senha invalidos.");
+    }
+  }
+
+  async function handleAuthAvatarChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    if (!file.type.startsWith("image/")) {
+      setAuthError("Escolha uma imagem para a foto de perfil.");
+      return;
+    }
+
+    setAuthAvatarUrl(await readImageFile(file));
+  }
+
+  function logout() {
+    disconnectCall();
+    window.localStorage.removeItem(AUTH_STORAGE_KEY);
+    window.sessionStorage.removeItem(CLIENT_STORAGE_KEY);
+    setCurrentUser(null);
+    setAuthToken("");
+    setClientId("");
+    setName("");
+    setDraftName("");
+    setProfileOpen(false);
+    setAuthPassword("");
+    setStatus("Entre na sua conta para acessar o servidor.");
+  }
+
   const visibleName = name || "Amigo";
   const localPreviewStream = screenStream ?? localStream;
   const localPreviewLabel = screenStream ? `${visibleName} (sua tela)` : `${visibleName} (voce)`;
@@ -1433,15 +1622,98 @@ export default function Home() {
         return {
           id: participant.clientId,
           name: participant.clientId === clientId ? visibleName : participant.name,
+          avatarUrl: participant.clientId === clientId ? currentUser?.avatarUrl ?? "" : participant.avatarUrl,
           isLocal: participant.clientId === clientId,
           hasVoice: Boolean(peer?.voiceStream),
           hasLive: Boolean(peer?.screenAudioStream),
         };
       })
     : [
-        ...(isConnected ? [{ id: clientId || "local", name: visibleName, isLocal: true, hasVoice: false, hasLive: false }] : []),
-        ...remotePeers.map((peer) => ({ id: peer.id, name: peer.name, isLocal: false, hasVoice: Boolean(peer.voiceStream), hasLive: Boolean(peer.screenAudioStream) })),
+        ...(isConnected ? [{ id: clientId || "local", name: visibleName, avatarUrl: currentUser?.avatarUrl ?? "", isLocal: true, hasVoice: false, hasLive: false }] : []),
+        ...remotePeers.map((peer) => ({ id: peer.id, name: peer.name, avatarUrl: peer.avatarUrl, isLocal: false, hasVoice: Boolean(peer.voiceStream), hasLive: Boolean(peer.screenAudioStream) })),
       ];
+
+  if (!isReady) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-card" aria-label="Carregando Sharetalk">
+          <div className="auth-brand">
+            <div className="server-mark">ST</div>
+            <div>
+              <span>{APP_NAME}</span>
+              <h1>Carregando</h1>
+            </div>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-card" aria-label="Entrar no Sharetalk">
+          <div className="auth-brand">
+            <div className="server-mark">ST</div>
+            <div>
+              <span>{APP_NAME}</span>
+              <h1>{authMode === "register" ? "Criar conta" : "Entrar"}</h1>
+            </div>
+          </div>
+          <form className="auth-form" onSubmit={handleAuthSubmit}>
+            <label htmlFor="auth-user">Usuario</label>
+            <input
+              id="auth-user"
+              value={authUsername}
+              onChange={(event) => setAuthUsername(event.target.value)}
+              placeholder="seu.usuario"
+              autoComplete="username"
+            />
+            {authMode === "register" ? (
+              <>
+                <label htmlFor="auth-display">Nome no servidor</label>
+                <input
+                  id="auth-display"
+                  value={authDisplayName}
+                  onChange={(event) => setAuthDisplayName(event.target.value)}
+                  placeholder="Como voce quer aparecer"
+                  autoComplete="name"
+                />
+                <label htmlFor="auth-avatar">Foto de perfil</label>
+                <div className="avatar-edit-row">
+                  <ProfileAvatar name={authDisplayName || authUsername || "Amigo"} avatarUrl={authAvatarUrl} />
+                  <input id="auth-avatar" type="file" accept="image/*" onChange={handleAuthAvatarChange} />
+                </div>
+              </>
+            ) : null}
+            <label htmlFor="auth-password">Senha</label>
+            <input
+              id="auth-password"
+              type="password"
+              value={authPassword}
+              onChange={(event) => setAuthPassword(event.target.value)}
+              placeholder="Sua senha"
+              autoComplete={authMode === "register" ? "new-password" : "current-password"}
+            />
+            {authError ? <p className="auth-error">{authError}</p> : null}
+            <button type="submit" className="primary-button">
+              {authMode === "register" ? "Criar e entrar" : "Entrar no servidor"}
+            </button>
+          </form>
+          <button
+            type="button"
+            className="auth-switch"
+            onClick={() => {
+              setAuthMode((mode) => mode === "register" ? "login" : "register");
+              setAuthError("");
+            }}
+          >
+            {authMode === "register" ? "Ja tenho conta" : "Criar nova conta"}
+          </button>
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="app-shell">
@@ -1503,7 +1775,7 @@ export default function Home() {
                 <div className="voice-participants">
                   {voiceParticipants.map((participant) => (
                     <div className="voice-participant" key={participant.id}>
-                      <span>{participant.name.slice(0, 1).toUpperCase()}</span>
+                      <ProfileAvatar name={participant.name} avatarUrl={participant.avatarUrl} />
                       <div className="voice-participant-body">
                         <p>{participant.name}{participant.isLocal ? " (voce)" : ""}</p>
                         {!participant.isLocal && (participant.hasVoice || participant.hasLive) ? (
@@ -1749,18 +2021,38 @@ export default function Home() {
           </section>
         ) : null}
 
-        <form className="room-form" onSubmit={saveName}>
-          <label htmlFor="name">Seu nome</label>
-          <div className="inline-fields">
-            <input
-              id="name"
-              value={draftName}
-              onChange={(event) => setDraftName(event.target.value)}
-              placeholder="Digite seu nome"
-            />
-            <button type="submit">Salvar</button>
+        <section className="profile-card" aria-label="Perfil do usuario">
+          <div className="profile-summary">
+            <ProfileAvatar name={currentUser.displayName} avatarUrl={currentUser.avatarUrl} />
+            <div>
+              <strong>{currentUser.displayName}</strong>
+              <span>@{currentUser.username}</span>
+            </div>
+            <button type="button" onClick={() => setProfileOpen((value) => !value)}>
+              {profileOpen ? "Fechar" : "Editar"}
+            </button>
           </div>
-        </form>
+          {profileOpen ? (
+            <form className="profile-form" onSubmit={saveProfile}>
+              <label htmlFor="profile-name">Nome no servidor</label>
+              <input
+                id="profile-name"
+                value={profileName}
+                onChange={(event) => setProfileName(event.target.value)}
+                placeholder="Seu nome"
+              />
+              <label htmlFor="profile-avatar">Foto de perfil</label>
+              <div className="avatar-edit-row">
+                <ProfileAvatar name={profileName || currentUser.displayName} avatarUrl={profileAvatarUrl} />
+                <input id="profile-avatar" type="file" accept="image/*" onChange={handleProfileAvatarChange} />
+              </div>
+              <div className="profile-actions">
+                <button type="submit" className="primary-button">Salvar perfil</button>
+                <button type="button" onClick={logout}>Sair</button>
+              </div>
+            </form>
+          ) : null}
+        </section>
 
         <section className="chat-panel" aria-label="Chat persistente">
           <div className="chat-head">
@@ -1802,6 +2094,14 @@ export default function Home() {
         </section>
       </aside>
     </main>
+  );
+}
+
+function ProfileAvatar({ name, avatarUrl }: { name: string; avatarUrl?: string }) {
+  return (
+    <span className="profile-avatar" aria-hidden="true">
+      {avatarUrl ? <img src={avatarUrl} alt="" /> : avatarInitial(name)}
+    </span>
   );
 }
 
