@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Papo Vivo",
-  description: "Sala privada para video, compartilhamento de tela e chat persistente.",
+  title: "Sharetalk",
+  description: "Servidor privado para voz, video, compartilhamento de tela e chat persistente.",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",

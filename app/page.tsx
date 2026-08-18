@@ -49,17 +49,29 @@ type DeviceSelections = {
   audioOutputId: string;
 };
 
+type ChannelKind = "text" | "voice";
+
+type ServerChannel = {
+  id: string;
+  name: string;
+  type: ChannelKind;
+  createdAt: number;
+  updatedAt: number;
+};
+
 const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
-const DEFAULT_SERVER = "servidor-amigos";
-const TEXT_CHANNELS = [
-  { id: "geral", name: "geral" },
-  { id: "avisos", name: "avisos" },
-  { id: "memes", name: "memes" },
+const APP_NAME = "Sharetalk";
+const DEFAULT_SERVER = "infernus";
+const SERVER_DISPLAY_NAME = "Infernus";
+const DEFAULT_TEXT_CHANNELS: ServerChannel[] = [
+  { id: "geral", name: "geral", type: "text", createdAt: 0, updatedAt: 0 },
+  { id: "avisos", name: "avisos", type: "text", createdAt: 0, updatedAt: 0 },
+  { id: "memes", name: "memes", type: "text", createdAt: 0, updatedAt: 0 },
 ];
-const VOICE_CHANNELS = [
-  { id: "lounge", name: "Lounge" },
-  { id: "jogos", name: "Jogos" },
-  { id: "estudo", name: "Estudo" },
+const DEFAULT_VOICE_CHANNELS: ServerChannel[] = [
+  { id: "lounge", name: "Lounge", type: "voice", createdAt: 0, updatedAt: 0 },
+  { id: "jogos", name: "Jogos", type: "voice", createdAt: 0, updatedAt: 0 },
+  { id: "estudo", name: "Estudo", type: "voice", createdAt: 0, updatedAt: 0 },
 ];
 const CLIENT_STORAGE_KEY = "papo-client-id";
 const ACTIVE_VOICE_STORAGE_KEY = "papo-voz-ativa";
@@ -111,8 +123,10 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 export default function Home() {
   const [isReady, setIsReady] = useState(false);
   const serverId = DEFAULT_SERVER;
-  const [selectedTextChannel, setSelectedTextChannel] = useState(TEXT_CHANNELS[0].id);
-  const [selectedVoiceChannel, setSelectedVoiceChannel] = useState(VOICE_CHANNELS[0].id);
+  const [textChannels, setTextChannels] = useState<ServerChannel[]>(DEFAULT_TEXT_CHANNELS);
+  const [voiceChannels, setVoiceChannels] = useState<ServerChannel[]>(DEFAULT_VOICE_CHANNELS);
+  const [selectedTextChannel, setSelectedTextChannel] = useState(DEFAULT_TEXT_CHANNELS[0].id);
+  const [selectedVoiceChannel, setSelectedVoiceChannel] = useState(DEFAULT_VOICE_CHANNELS[0].id);
   const [clientId, setClientId] = useState("");
   const [connectionId, setConnectionId] = useState("");
   const [name, setName] = useState("");
@@ -154,6 +168,17 @@ export default function Home() {
   const lastSignalIdRef = useRef(0);
   const connectionRequestsRef = useRef<Map<string, number>>(new Map());
 
+  const loadChannels = useCallback(async () => {
+    const result = await api<{ channels: ServerChannel[] }>(`/api/channels?serverId=${encodeURIComponent(serverId)}`);
+    const nextTextChannels = result.channels.filter((channel) => channel.type === "text");
+    const nextVoiceChannels = result.channels.filter((channel) => channel.type === "voice");
+
+    setTextChannels(nextTextChannels.length > 0 ? nextTextChannels : DEFAULT_TEXT_CHANNELS);
+    setVoiceChannels(nextVoiceChannels.length > 0 ? nextVoiceChannels : DEFAULT_VOICE_CHANNELS);
+    setSelectedTextChannel((current) => nextTextChannels.some((channel) => channel.id === current) ? current : (nextTextChannels[0]?.id ?? DEFAULT_TEXT_CHANNELS[0].id));
+    setSelectedVoiceChannel((current) => nextVoiceChannels.some((channel) => channel.id === current) ? current : (nextVoiceChannels[0]?.id ?? DEFAULT_VOICE_CHANNELS[0].id));
+  }, [serverId]);
+
   useEffect(() => {
     const current = new URL(window.location.href);
     const targetPath = serverPath(DEFAULT_SERVER);
@@ -168,7 +193,7 @@ export default function Home() {
     window.sessionStorage.setItem(CLIENT_STORAGE_KEY, storedClientId);
     setClientId(storedClientId);
     setConnectionId(makeId("conexao"));
-    if (storedVoice?.serverId === DEFAULT_SERVER && storedVoice.channelId && VOICE_CHANNELS.some((channel) => channel.id === storedVoice.channelId)) {
+    if (storedVoice?.serverId === DEFAULT_SERVER && storedVoice.channelId) {
       setSelectedVoiceChannel(storedVoice.channelId);
     }
     setName(storedName);
@@ -183,10 +208,23 @@ export default function Home() {
     setIsReady(true);
   }, []);
 
+  useEffect(() => {
+    if (!isReady) {
+      return undefined;
+    }
+
+    loadChannels().catch(() => setError("Nao consegui atualizar a lista de canais agora."));
+    const interval = window.setInterval(() => {
+      loadChannels().catch(() => undefined);
+    }, 5000);
+
+    return () => window.clearInterval(interval);
+  }, [isReady, loadChannels]);
+
   const textRoomKey = `${serverId}:texto:${selectedTextChannel}`;
   const voiceRoomKey = `${serverId}:voz:${selectedVoiceChannel}`;
-  const currentTextChannel = TEXT_CHANNELS.find((channel) => channel.id === selectedTextChannel) ?? TEXT_CHANNELS[0];
-  const currentVoiceChannel = VOICE_CHANNELS.find((channel) => channel.id === selectedVoiceChannel) ?? VOICE_CHANNELS[0];
+  const currentTextChannel = textChannels.find((channel) => channel.id === selectedTextChannel) ?? textChannels[0] ?? DEFAULT_TEXT_CHANNELS[0];
+  const currentVoiceChannel = voiceChannels.find((channel) => channel.id === selectedVoiceChannel) ?? voiceChannels[0] ?? DEFAULT_VOICE_CHANNELS[0];
 
   useEffect(() => {
     localStreamRef.current = localStream;
@@ -584,14 +622,16 @@ export default function Home() {
     setMediaDevices(devices);
   }, []);
 
-  const getMediaConstraints = useCallback((): MediaStreamConstraints => {
+  const getMediaConstraints = useCallback((includeVideo = true): MediaStreamConstraints => {
     return {
       audio: deviceSelections.audioInputId
         ? { deviceId: { exact: deviceSelections.audioInputId } }
         : true,
-      video: deviceSelections.videoInputId
-        ? { deviceId: { exact: deviceSelections.videoInputId } }
-        : true,
+      video: includeVideo
+        ? deviceSelections.videoInputId
+          ? { deviceId: { exact: deviceSelections.videoInputId } }
+          : true
+        : false,
     };
   }, [deviceSelections.audioInputId, deviceSelections.videoInputId]);
 
@@ -604,7 +644,7 @@ export default function Home() {
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints());
+      const stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints(cameraOn));
       const previousStream = localStreamRef.current;
       previousStream?.getTracks().forEach((track) => track.stop());
       localStreamRef.current = stream;
@@ -624,7 +664,7 @@ export default function Home() {
       setError("Nao consegui usar os dispositivos selecionados.");
       return null;
     }
-  }, [getMediaConstraints, refreshDevices, replaceAudioTrack, replaceVideoTrack, startScreenAudioShare]);
+  }, [cameraOn, getMediaConstraints, refreshDevices, replaceAudioTrack, replaceVideoTrack, startScreenAudioShare]);
 
   const requestDeviceAccess = useCallback(async () => {
     setError("");
@@ -677,7 +717,7 @@ export default function Home() {
     try {
       let stream: MediaStream;
       try {
-        stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints());
+        stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints(false));
       } catch {
         stream = await navigator.mediaDevices.getUserMedia({
           audio: deviceSelections.audioInputId
@@ -689,11 +729,9 @@ export default function Home() {
       }
       localStreamRef.current = stream;
       setLocalStream(stream);
-      setCameraOn(Boolean(stream.getVideoTracks()[0]?.enabled));
+      setCameraOn(false);
       setMicOn(Boolean(stream.getAudioTracks()[0]?.enabled));
-      if (stream.getVideoTracks().length > 0) {
-        setStatus("Camera e microfone conectados.");
-      }
+      setStatus("Microfone conectado. Camera entra desligada.");
       await refreshDevices();
       setMediaAccessStatus("granted");
       setMediaAccessMessage("Permissao concedida. Dispositivos carregados.");
@@ -1087,12 +1125,48 @@ export default function Home() {
     postPresence().catch(() => undefined);
   }
 
-  function toggleCamera() {
+  async function toggleCamera() {
     const videoTrack = localStream?.getVideoTracks()[0];
-    if (!videoTrack) {
+    if (!localStream) {
       return;
     }
+
+    if (!videoTrack) {
+      try {
+        const cameraStream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: deviceSelections.videoInputId
+            ? { deviceId: { exact: deviceSelections.videoInputId } }
+            : true,
+        });
+        const [newVideoTrack] = cameraStream.getVideoTracks();
+        if (!newVideoTrack) {
+          setError("Nao encontrei camera para ativar.");
+          return;
+        }
+        localStream.addTrack(newVideoTrack);
+        localStreamRef.current = localStream;
+        setLocalStream(new MediaStream(localStream.getTracks()));
+        if (!screenStreamRef.current) {
+          replaceVideoTrack(newVideoTrack);
+        }
+        setCameraOn(true);
+        await refreshDevices();
+        postSignal("state", {
+          name: name || "Amigo",
+          micOn,
+          cameraOn: true,
+          screenOn: Boolean(screenStreamRef.current),
+        }).catch(() => undefined);
+        postPresence().catch(() => undefined);
+      } catch {
+        setError("Nao consegui ativar a camera. Confira a permissao do navegador.");
+      }
+      return;
+    }
+
     videoTrack.enabled = !videoTrack.enabled;
+    replaceVideoTrack(screenStreamRef.current?.getVideoTracks()[0] ?? (videoTrack.enabled ? videoTrack : null));
     setCameraOn(videoTrack.enabled);
     postSignal("state", {
       name: name || "Amigo",
@@ -1222,7 +1296,82 @@ export default function Home() {
     if (localStreamRef.current) {
       window.sessionStorage.setItem(ACTIVE_VOICE_STORAGE_KEY, JSON.stringify({ serverId, channelId }));
     }
-    setStatus(`Canal de voz ${VOICE_CHANNELS.find((channel) => channel.id === channelId)?.name ?? channelId} selecionado.`);
+    setStatus(`Canal de voz ${voiceChannels.find((channel) => channel.id === channelId)?.name ?? channelId} selecionado.`);
+  }
+
+  async function createChannel(type: ChannelKind) {
+    const label = type === "text" ? "texto" : "voz";
+    const nameValue = window.prompt(`Nome do novo canal de ${label}:`)?.trim();
+    if (!nameValue) {
+      return;
+    }
+
+    try {
+      const result = await api<{ channel: ServerChannel }>("/api/channels", {
+        method: "POST",
+        body: JSON.stringify({ serverId, type, name: nameValue }),
+      });
+      await loadChannels();
+      if (type === "text") {
+        switchTextChannel(result.channel.id);
+      } else {
+        switchVoiceChannel(result.channel.id);
+      }
+      setStatus(`Canal ${nameValue} criado.`);
+    } catch {
+      setError("Nao consegui criar o canal agora.");
+    }
+  }
+
+  async function renameChannel(channel: ServerChannel) {
+    const nameValue = window.prompt("Novo nome do canal:", channel.name)?.trim();
+    if (!nameValue || nameValue === channel.name) {
+      return;
+    }
+
+    try {
+      await api<{ channel: ServerChannel }>("/api/channels", {
+        method: "PATCH",
+        body: JSON.stringify({ serverId, id: channel.id, name: nameValue }),
+      });
+      await loadChannels();
+      setStatus(`Canal renomeado para ${nameValue}.`);
+    } catch {
+      setError("Nao consegui renomear o canal agora.");
+    }
+  }
+
+  async function removeChannel(channel: ServerChannel) {
+    const channels = channel.type === "text" ? textChannels : voiceChannels;
+    if (channels.length <= 1) {
+      setError("Mantenha pelo menos um canal de cada tipo.");
+      return;
+    }
+
+    if (!window.confirm(`Remover o canal ${channel.type === "text" ? "#" : ""}${channel.name}?`)) {
+      return;
+    }
+
+    try {
+      await api<{ ok: boolean }>("/api/channels", {
+        method: "DELETE",
+        body: JSON.stringify({ serverId, id: channel.id }),
+      });
+      if (channel.type === "text" && selectedTextChannel === channel.id) {
+        setSelectedTextChannel(channels.find((item) => item.id !== channel.id)?.id ?? DEFAULT_TEXT_CHANNELS[0].id);
+        setMessages([]);
+      }
+      if (channel.type === "voice" && selectedVoiceChannel === channel.id) {
+        if (localStreamRef.current) {
+          disconnectCall();
+        }
+        setSelectedVoiceChannel(channels.find((item) => item.id !== channel.id)?.id ?? DEFAULT_VOICE_CHANNELS[0].id);
+      }
+      await loadChannels();
+      setStatus(`Canal ${channel.name} removido.`);
+    } catch {
+      setError("Nao consegui remover o canal agora.");
+    }
   }
 
   const visibleName = name || "Amigo";
@@ -1297,42 +1446,59 @@ export default function Home() {
   return (
     <main className="app-shell">
       <nav className="server-rail" aria-label="Servidor fixo">
-        <div className="server-mark" title="Papo Vivo">PV</div>
+        <div className="server-mark" title={APP_NAME}>ST</div>
       </nav>
 
       <aside className="channel-sidebar" aria-label="Canais do servidor">
         <div className="server-header">
           <span>Servidor</span>
-          <strong>{serverId}</strong>
+          <strong>{SERVER_DISPLAY_NAME}</strong>
         </div>
 
         <section className="channel-section" aria-label="Canais de texto">
-          <div className="channel-heading">Texto</div>
-          {TEXT_CHANNELS.map((channel) => (
-            <button
-              type="button"
-              key={channel.id}
-              className={`channel-button ${selectedTextChannel === channel.id ? "is-selected" : ""}`}
-              onClick={() => switchTextChannel(channel.id)}
-            >
-              <span>#</span>
-              {channel.name}
-            </button>
+          <div className="channel-heading">
+            <span>Texto</span>
+            <button type="button" onClick={() => createChannel("text")} aria-label="Criar canal de texto" title="Criar canal de texto">+</button>
+          </div>
+          {textChannels.map((channel) => (
+            <div className="channel-row" key={channel.id}>
+              <button
+                type="button"
+                className={`channel-button ${selectedTextChannel === channel.id ? "is-selected" : ""}`}
+                onClick={() => switchTextChannel(channel.id)}
+              >
+                <span>#</span>
+                {channel.name}
+              </button>
+              <div className="channel-actions" aria-label={`Acoes do canal ${channel.name}`}>
+                <button type="button" onClick={() => renameChannel(channel)} aria-label={`Editar canal ${channel.name}`} title="Editar">E</button>
+                <button type="button" onClick={() => removeChannel(channel)} aria-label={`Remover canal ${channel.name}`} title="Remover">x</button>
+              </div>
+            </div>
           ))}
         </section>
 
         <section className="channel-section" aria-label="Canais de voz">
-          <div className="channel-heading">Voz</div>
-          {VOICE_CHANNELS.map((channel) => (
+          <div className="channel-heading">
+            <span>Voz</span>
+            <button type="button" onClick={() => createChannel("voice")} aria-label="Criar canal de voz" title="Criar canal de voz">+</button>
+          </div>
+          {voiceChannels.map((channel) => (
             <div className="voice-channel-group" key={channel.id}>
-              <button
-                type="button"
-                className={`channel-button voice-channel ${selectedVoiceChannel === channel.id ? "is-selected" : ""}`}
-                onClick={() => switchVoiceChannel(channel.id)}
-              >
-                <span>◉</span>
-                {channel.name}
-              </button>
+              <div className="channel-row">
+                <button
+                  type="button"
+                  className={`channel-button voice-channel ${selectedVoiceChannel === channel.id ? "is-selected" : ""}`}
+                  onClick={() => switchVoiceChannel(channel.id)}
+                >
+                  <span>◉</span>
+                  {channel.name}
+                </button>
+                <div className="channel-actions" aria-label={`Acoes do canal ${channel.name}`}>
+                  <button type="button" onClick={() => renameChannel(channel)} aria-label={`Editar canal ${channel.name}`} title="Editar">E</button>
+                  <button type="button" onClick={() => removeChannel(channel)} aria-label={`Remover canal ${channel.name}`} title="Remover">x</button>
+                </div>
+              </div>
               {selectedVoiceChannel === channel.id && voiceParticipants.length > 0 ? (
                 <div className="voice-participants">
                   {voiceParticipants.map((participant) => (
@@ -1387,8 +1553,7 @@ export default function Home() {
       <section className="call-area" aria-label="Chamada de video">
         <header className="topbar">
           <div>
-            <p className="eyebrow">Papo ao vivo</p>
-            <h1>{serverId}</h1>
+            <h1>{SERVER_DISPLAY_NAME}</h1>
           </div>
         </header>
 

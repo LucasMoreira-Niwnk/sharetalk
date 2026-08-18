@@ -47,12 +47,23 @@ type PresenceRow = {
   last_seen: number;
 };
 
+type ChannelRow = {
+  id: string;
+  server_id: string;
+  name: string;
+  type: "text" | "voice";
+  order_index: number;
+  created_at: number;
+  updated_at: number;
+};
+
 type LocalStore = {
   nextMessageId: number;
   nextSignalId: number;
   messages: ChatMessageRow[];
   signals: SignalRow[];
   presences: PresenceRow[];
+  channels: ChannelRow[];
 };
 
 const jsonHeaders = {
@@ -60,6 +71,15 @@ const jsonHeaders = {
   "cache-control": "no-store",
 };
 const PRESENCE_TTL_MS = 6500;
+const DEFAULT_SERVER_ID = "infernus";
+const DEFAULT_CHANNELS: Omit<ChannelRow, "server_id" | "created_at" | "updated_at">[] = [
+  { id: "geral", name: "geral", type: "text", order_index: 1 },
+  { id: "avisos", name: "avisos", type: "text", order_index: 2 },
+  { id: "memes", name: "memes", type: "text", order_index: 3 },
+  { id: "lounge", name: "Lounge", type: "voice", order_index: 1 },
+  { id: "jogos", name: "Jogos", type: "voice", order_index: 2 },
+  { id: "estudo", name: "Estudo", type: "voice", order_index: 3 },
+];
 
 const emptyStore = (): LocalStore => ({
   nextMessageId: 1,
@@ -67,6 +87,7 @@ const emptyStore = (): LocalStore => ({
   messages: [],
   signals: [],
   presences: [],
+  channels: [],
 });
 
 async function readLocalStore(): Promise<LocalStore> {
@@ -107,7 +128,141 @@ async function writeLocalStore(store: LocalStore) {
 
 function normalizeStore(store: LocalStore): LocalStore {
   store.presences ??= [];
+  store.channels ??= [];
   return store;
+}
+
+function defaultChannels(serverId: string): ChannelRow[] {
+  const now = Date.now();
+  return DEFAULT_CHANNELS.map((channel) => ({
+    ...channel,
+    server_id: serverId,
+    created_at: now,
+    updated_at: now,
+  }));
+}
+
+function toChannel(row: ChannelRow) {
+  return {
+    id: row.id,
+    name: row.name,
+    type: row.type,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function channelIdFromName(name: string) {
+  const id = name
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+
+  return id || `canal-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function uniqueChannelId(rows: ChannelRow[], serverId: string, name: string) {
+  const base = channelIdFromName(name);
+  let candidate = base;
+  let suffix = 2;
+
+  while (rows.some((row) => row.server_id === serverId && row.id === candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+
+  return candidate;
+}
+
+async function handleLocalChannels(request: Request) {
+  const url = new URL(request.url);
+  const store = await readLocalStore();
+  const serverId = cleanText(url.searchParams.get("serverId"), DEFAULT_SERVER_ID, 80);
+
+  if (!store.channels.some((channel) => channel.server_id === serverId)) {
+    store.channels.push(...defaultChannels(serverId));
+    await writeLocalStore(store);
+  }
+
+  if (request.method === "GET") {
+    return json({
+      channels: store.channels
+        .filter((channel) => channel.server_id === serverId)
+        .sort((a, b) => a.type.localeCompare(b.type) || a.order_index - b.order_index || a.created_at - b.created_at)
+        .map(toChannel),
+    });
+  }
+
+  if (request.method === "POST") {
+    const body = (await request.json()) as Record<string, unknown>;
+    const bodyServerId = cleanText(body.serverId, serverId, 80);
+    const type = body.type === "voice" ? "voice" : "text";
+    const name = cleanText(body.name, type === "voice" ? "Novo canal" : "novo-canal", 48);
+    const now = Date.now();
+    const orderIndex = store.channels.filter((channel) => channel.server_id === bodyServerId && channel.type === type).length + 1;
+    const row: ChannelRow = {
+      id: uniqueChannelId(store.channels, bodyServerId, name),
+      server_id: bodyServerId,
+      name,
+      type,
+      order_index: orderIndex,
+      created_at: now,
+      updated_at: now,
+    };
+
+    store.channels.push(row);
+    await writeLocalStore(store);
+
+    return json({ channel: toChannel(row) }, 201);
+  }
+
+  if (request.method === "PATCH") {
+    const body = (await request.json()) as Record<string, unknown>;
+    const bodyServerId = cleanText(body.serverId, serverId, 80);
+    const id = cleanText(body.id, "", 80);
+    const name = cleanText(body.name, "", 48);
+    const row = store.channels.find((channel) => channel.server_id === bodyServerId && channel.id === id);
+
+    if (!row || !name) {
+      return json({ error: "Canal nao encontrado." }, 404);
+    }
+
+    row.name = name;
+    row.updated_at = Date.now();
+    await writeLocalStore(store);
+
+    return json({ channel: toChannel(row) });
+  }
+
+  if (request.method === "DELETE") {
+    const body = (await request.json()) as Record<string, unknown>;
+    const bodyServerId = cleanText(body.serverId, serverId, 80);
+    const id = cleanText(body.id, "", 80);
+    const row = store.channels.find((channel) => channel.server_id === bodyServerId && channel.id === id);
+
+    if (!row) {
+      return json({ error: "Canal nao encontrado." }, 404);
+    }
+
+    const sameTypeCount = store.channels.filter((channel) => channel.server_id === bodyServerId && channel.type === row.type).length;
+    if (sameTypeCount <= 1) {
+      return json({ error: "Mantenha pelo menos um canal deste tipo." }, 400);
+    }
+
+    store.channels = store.channels.filter((channel) => !(channel.server_id === bodyServerId && channel.id === id));
+    const roomPrefix = `${bodyServerId}:${row.type === "voice" ? "voz" : "texto"}:${id}`;
+    store.messages = store.messages.filter((message) => message.room_id !== roomPrefix);
+    store.signals = store.signals.filter((signal) => signal.room_id !== roomPrefix);
+    store.presences = store.presences.filter((presence) => presence.room_id !== roomPrefix);
+    await writeLocalStore(store);
+
+    return json({ ok: true });
+  }
+
+  return json({ error: "Metodo nao permitido." }, 405);
 }
 
 async function handleLocalMessages(request: Request) {
@@ -312,6 +467,18 @@ async function ensureSchema(db: D1Database) {
     )`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_voice_presence_room_seen
       ON voice_presence(room_id, last_seen)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS server_channels (
+      id TEXT NOT NULL,
+      server_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      order_index INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (server_id, id)
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_server_channels_server_type
+      ON server_channels(server_id, type, order_index)`),
   ]);
 }
 
@@ -398,6 +565,140 @@ async function handleMessages(request: Request, env?: Env) {
       .first<ChatMessageRow>();
 
     return json({ message: toMessage(result as ChatMessageRow) }, 201);
+  }
+
+  return json({ error: "Metodo nao permitido." }, 405);
+}
+
+async function handleChannels(request: Request, env?: Env) {
+  if (!env?.DB) {
+    return handleLocalChannels(request);
+  }
+
+  await ensureSchema(env.DB);
+  const url = new URL(request.url);
+  const serverId = cleanText(url.searchParams.get("serverId"), DEFAULT_SERVER_ID, 80);
+
+  const existing = await env.DB.prepare(`SELECT COUNT(*) AS total FROM server_channels WHERE server_id = ?`)
+    .bind(serverId)
+    .first<{ total: number }>();
+
+  if (!existing?.total) {
+    const now = Date.now();
+    await env.DB.batch(DEFAULT_CHANNELS.map((channel) =>
+      env.DB!.prepare(
+        `INSERT OR IGNORE INTO server_channels (id, server_id, name, type, order_index, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(channel.id, serverId, channel.name, channel.type, channel.order_index, now, now),
+    ));
+  }
+
+  if (request.method === "GET") {
+    const result = await env.DB.prepare(
+      `SELECT id, server_id, name, type, order_index, created_at, updated_at
+       FROM server_channels
+       WHERE server_id = ?
+       ORDER BY type ASC, order_index ASC, created_at ASC`,
+    )
+      .bind(serverId)
+      .all<ChannelRow>();
+
+    return json({ channels: (result.results ?? []).map(toChannel) });
+  }
+
+  if (request.method === "POST") {
+    const body = (await request.json()) as Record<string, unknown>;
+    const bodyServerId = cleanText(body.serverId, serverId, 80);
+    const type = body.type === "voice" ? "voice" : "text";
+    const name = cleanText(body.name, type === "voice" ? "Novo canal" : "novo-canal", 48);
+    const rows = await env.DB.prepare(`SELECT id, server_id, name, type, order_index, created_at, updated_at FROM server_channels WHERE server_id = ?`)
+      .bind(bodyServerId)
+      .all<ChannelRow>();
+    const existingRows = rows.results ?? [];
+    const id = uniqueChannelId(existingRows, bodyServerId, name);
+    const orderIndex = existingRows.filter((channel) => channel.type === type).length + 1;
+    const now = Date.now();
+
+    await env.DB.prepare(
+      `INSERT INTO server_channels (id, server_id, name, type, order_index, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(id, bodyServerId, name, type, orderIndex, now, now)
+      .run();
+
+    return json({
+      channel: toChannel({
+        id,
+        server_id: bodyServerId,
+        name,
+        type,
+        order_index: orderIndex,
+        created_at: now,
+        updated_at: now,
+      }),
+    }, 201);
+  }
+
+  if (request.method === "PATCH") {
+    const body = (await request.json()) as Record<string, unknown>;
+    const bodyServerId = cleanText(body.serverId, serverId, 80);
+    const id = cleanText(body.id, "", 80);
+    const name = cleanText(body.name, "", 48);
+    const now = Date.now();
+
+    if (!name) {
+      return json({ error: "Nome invalido." }, 400);
+    }
+
+    const row = await env.DB.prepare(
+      `UPDATE server_channels
+       SET name = ?, updated_at = ?
+       WHERE server_id = ? AND id = ?
+       RETURNING id, server_id, name, type, order_index, created_at, updated_at`,
+    )
+      .bind(name, now, bodyServerId, id)
+      .first<ChannelRow>();
+
+    if (!row) {
+      return json({ error: "Canal nao encontrado." }, 404);
+    }
+
+    return json({ channel: toChannel(row) });
+  }
+
+  if (request.method === "DELETE") {
+    const body = (await request.json()) as Record<string, unknown>;
+    const bodyServerId = cleanText(body.serverId, serverId, 80);
+    const id = cleanText(body.id, "", 80);
+    const row = await env.DB.prepare(
+      `SELECT id, server_id, name, type, order_index, created_at, updated_at
+       FROM server_channels
+       WHERE server_id = ? AND id = ?`,
+    )
+      .bind(bodyServerId, id)
+      .first<ChannelRow>();
+
+    if (!row) {
+      return json({ error: "Canal nao encontrado." }, 404);
+    }
+
+    const count = await env.DB.prepare(`SELECT COUNT(*) AS total FROM server_channels WHERE server_id = ? AND type = ?`)
+      .bind(bodyServerId, row.type)
+      .first<{ total: number }>();
+
+    if ((count?.total ?? 0) <= 1) {
+      return json({ error: "Mantenha pelo menos um canal deste tipo." }, 400);
+    }
+
+    const roomId = `${bodyServerId}:${row.type === "voice" ? "voz" : "texto"}:${id}`;
+    await env.DB.batch([
+      env.DB.prepare(`DELETE FROM server_channels WHERE server_id = ? AND id = ?`).bind(bodyServerId, id),
+      env.DB.prepare(`DELETE FROM chat_messages WHERE room_id = ?`).bind(roomId),
+      env.DB.prepare(`DELETE FROM room_signals WHERE room_id = ?`).bind(roomId),
+      env.DB.prepare(`DELETE FROM voice_presence WHERE room_id = ?`).bind(roomId),
+    ]);
+
+    return json({ ok: true });
   }
 
   return json({ error: "Metodo nao permitido." }, 405);
@@ -545,6 +846,10 @@ const worker = {
 
     if (url.pathname === "/api/messages") {
       return handleMessages(request, env);
+    }
+
+    if (url.pathname === "/api/channels") {
+      return handleChannels(request, env);
     }
 
     if (url.pathname === "/api/signals") {

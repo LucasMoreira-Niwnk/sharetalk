@@ -37,8 +37,8 @@ test("server-renders the video room shell", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /Papo Vivo/i);
-  assert.match(html, /servidor-amigos/i);
+  assert.match(html, /Sharetalk/i);
+  assert.match(html, /Infernus/i);
   assert.match(html, /Chamada de video/i);
   assert.match(html, /Canais de texto/i);
   assert.match(html, /Canais de voz/i);
@@ -87,6 +87,83 @@ test("uses local persistence when D1 is unavailable", async () => {
     const payload = await loaded.json();
     assert.equal(payload.messages.length, 1);
     assert.equal(payload.messages[0].body, "Teste local");
+  } finally {
+    delete process.env.SHARETALK_DATA_FILE;
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("can manage local server channels when D1 is unavailable", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "sharetalk-channels-"));
+  process.env.SHARETALK_DATA_FILE = join(dataDir, "store.json");
+
+  try {
+    const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+    workerUrl.searchParams.set("channels", `${process.pid}-${Date.now()}`);
+    const { default: worker } = await import(workerUrl.href);
+    const ctx = {
+      waitUntil() {},
+      passThroughOnException() {},
+    };
+
+    const created = await worker.fetch(
+      new Request("http://localhost/api/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          serverId: "infernus",
+          type: "voice",
+          name: "Cinema",
+        }),
+      }),
+      undefined,
+      ctx,
+    );
+
+    assert.equal(created.status, 201);
+    const createdPayload = await created.json();
+    assert.equal(createdPayload.channel.name, "Cinema");
+
+    const renamed = await worker.fetch(
+      new Request("http://localhost/api/channels", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          serverId: "infernus",
+          id: createdPayload.channel.id,
+          name: "Filmes",
+        }),
+      }),
+      undefined,
+      ctx,
+    );
+
+    assert.equal(renamed.status, 200);
+    const renamedPayload = await renamed.json();
+    assert.equal(renamedPayload.channel.name, "Filmes");
+
+    const removed = await worker.fetch(
+      new Request("http://localhost/api/channels", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          serverId: "infernus",
+          id: createdPayload.channel.id,
+        }),
+      }),
+      undefined,
+      ctx,
+    );
+
+    assert.equal(removed.status, 200);
+
+    const loaded = await worker.fetch(
+      new Request("http://localhost/api/channels?serverId=infernus"),
+      undefined,
+      ctx,
+    );
+    const payload = await loaded.json();
+    assert.equal(payload.channels.some((channel) => channel.name === "Filmes"), false);
   } finally {
     delete process.env.SHARETALK_DATA_FILE;
     await rm(dataDir, { recursive: true, force: true });
