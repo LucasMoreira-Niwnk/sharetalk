@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, MouseEvent, useCallback, useEffect, useRef, useState } from "react";
 
 type ChatMessage = {
   id: number;
@@ -59,7 +59,6 @@ const VOICE_CHANNELS = [
   { id: "jogos", name: "Jogos" },
   { id: "estudo", name: "Estudo" },
 ];
-const SERVER_STORAGE_KEY = "papo-servidores";
 const CLIENT_STORAGE_KEY = "papo-client-id";
 const ACTIVE_VOICE_STORAGE_KEY = "papo-voz-ativa";
 
@@ -69,10 +68,6 @@ function makeId(prefix: string) {
   }
 
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function cleanServerId(value: string) {
-  return value.trim().replace(/[^a-zA-Z0-9_-]/g, "-") || DEFAULT_SERVER;
 }
 
 function asBoolean(value: unknown, fallback = false) {
@@ -89,12 +84,6 @@ function readActiveVoice() {
     window.sessionStorage.removeItem(ACTIVE_VOICE_STORAGE_KEY);
     return null;
   }
-}
-
-function getServerFromUrl(current: URL) {
-  const pathMatch = current.pathname.match(/^\/servers\/([^/]+)\/?$/);
-  const pathServer = pathMatch?.[1] ? decodeURIComponent(pathMatch[1]) : "";
-  return pathServer || current.searchParams.get("server") || current.searchParams.get("room") || "";
 }
 
 function serverPath(serverId: string) {
@@ -119,9 +108,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 export default function Home() {
   const [isReady, setIsReady] = useState(false);
-  const [serverId, setServerId] = useState(DEFAULT_SERVER);
-  const [serverDraft, setServerDraft] = useState(DEFAULT_SERVER);
-  const [servers, setServers] = useState<string[]>([DEFAULT_SERVER]);
+  const serverId = DEFAULT_SERVER;
   const [selectedTextChannel, setSelectedTextChannel] = useState(TEXT_CHANNELS[0].id);
   const [selectedVoiceChannel, setSelectedVoiceChannel] = useState(VOICE_CHANNELS[0].id);
   const [clientId, setClientId] = useState("");
@@ -163,28 +150,21 @@ export default function Home() {
 
   useEffect(() => {
     const current = new URL(window.location.href);
-    const existingServer = getServerFromUrl(current);
-    const nextServer = cleanServerId(existingServer || `servidor-${Math.random().toString(36).slice(2, 8)}`);
+    const targetPath = serverPath(DEFAULT_SERVER);
 
-    if (current.pathname !== serverPath(nextServer) || current.searchParams.has("server") || current.searchParams.has("room")) {
-      window.history.replaceState(null, "", serverPath(nextServer));
+    if (current.pathname !== targetPath || current.searchParams.has("server") || current.searchParams.has("room")) {
+      window.history.replaceState(null, "", targetPath);
     }
 
     const storedName = window.localStorage.getItem("papo-nome") ?? "";
-    const storedServers = JSON.parse(window.localStorage.getItem(SERVER_STORAGE_KEY) ?? "[]") as string[];
     const storedClientId = window.sessionStorage.getItem(CLIENT_STORAGE_KEY) || makeId("pessoa");
     const storedVoice = readActiveVoice();
-    const nextServers = Array.from(new Set([nextServer, DEFAULT_SERVER, ...storedServers.map(cleanServerId)]));
-    window.localStorage.setItem(SERVER_STORAGE_KEY, JSON.stringify(nextServers));
     window.sessionStorage.setItem(CLIENT_STORAGE_KEY, storedClientId);
     setClientId(storedClientId);
     setConnectionId(makeId("conexao"));
-    setServerId(nextServer);
-    setServerDraft(nextServer);
-    if (storedVoice?.serverId === nextServer && storedVoice.channelId && VOICE_CHANNELS.some((channel) => channel.id === storedVoice.channelId)) {
+    if (storedVoice?.serverId === DEFAULT_SERVER && storedVoice.channelId && VOICE_CHANNELS.some((channel) => channel.id === storedVoice.channelId)) {
       setSelectedVoiceChannel(storedVoice.channelId);
     }
-    setServers(nextServers);
     setName(storedName);
     setDraftName(storedName);
     if (!window.isSecureContext) {
@@ -201,14 +181,6 @@ export default function Home() {
   const voiceRoomKey = `${serverId}:voz:${selectedVoiceChannel}`;
   const currentTextChannel = TEXT_CHANNELS.find((channel) => channel.id === selectedTextChannel) ?? TEXT_CHANNELS[0];
   const currentVoiceChannel = VOICE_CHANNELS.find((channel) => channel.id === selectedVoiceChannel) ?? VOICE_CHANNELS[0];
-
-  const serverLink = useMemo(() => {
-    if (typeof window === "undefined") {
-      return "";
-    }
-
-    return new URL(serverPath(serverId), window.location.origin).toString();
-  }, [serverId]);
 
   useEffect(() => {
     localStreamRef.current = localStream;
@@ -1050,40 +1022,6 @@ export default function Home() {
     }
   }
 
-  async function copyRoomLink() {
-    await navigator.clipboard.writeText(serverLink);
-    setStatus("Link do servidor copiado.");
-  }
-
-  function changeServer(event: FormEvent) {
-    event.preventDefault();
-    openServer(cleanServerId(serverDraft));
-  }
-
-  function openServer(cleanServer: string) {
-    leavePresence().catch(() => undefined);
-    window.sessionStorage.removeItem(ACTIVE_VOICE_STORAGE_KEY);
-    window.history.pushState(null, "", serverPath(cleanServer));
-    peersRef.current.forEach((peer) => peer.close());
-    peersRef.current.clear();
-    peerConnectionIdsRef.current.clear();
-    setRemotePeers([]);
-    setPresenceParticipants([]);
-    lastSignalIdRef.current = 0;
-    setLastSignalId(0);
-    knownSignalsRef.current.clear();
-    setSpotlightId("");
-    setServerId(cleanServer);
-    setServerDraft(cleanServer);
-    setServers((items) => {
-      const nextServers = Array.from(new Set([cleanServer, ...items]));
-      window.localStorage.setItem(SERVER_STORAGE_KEY, JSON.stringify(nextServers));
-      return nextServers;
-    });
-    setMessages([]);
-    setStatus("Servidor trocado.");
-  }
-
   function switchTextChannel(channelId: string) {
     setSelectedTextChannel(channelId);
     setMessages([]);
@@ -1164,19 +1102,8 @@ export default function Home() {
 
   return (
     <main className="app-shell">
-      <nav className="server-rail" aria-label="Navegacao de servidores">
-        <div className="server-mark">PV</div>
-        {servers.map((server) => (
-          <button
-            type="button"
-            key={server}
-            className={`server-bubble ${server === serverId ? "is-active" : ""}`}
-            title={server}
-            onClick={() => openServer(server)}
-          >
-            {server.slice(0, 2).toUpperCase()}
-          </button>
-        ))}
+      <nav className="server-rail" aria-label="Servidor fixo">
+        <div className="server-mark" title="Papo Vivo">PV</div>
       </nav>
 
       <aside className="channel-sidebar" aria-label="Canais do servidor">
@@ -1245,9 +1172,6 @@ export default function Home() {
             </div>
           </div>
           <div className="top-actions">
-            <button type="button" className="ghost-button" onClick={copyRoomLink}>
-              Copiar servidor
-            </button>
             {!isConnected ? (
               <button type="button" className="primary-button" onClick={joinCall} disabled={!isReady}>
                 Entrar no canal
@@ -1418,20 +1342,6 @@ export default function Home() {
             </button>
           </section>
         ) : null}
-
-        <form className="room-form" onSubmit={changeServer}>
-          <label htmlFor="server">Criar ou abrir servidor</label>
-          <div className="inline-fields">
-            <input
-              id="server"
-              name="server"
-              value={serverDraft}
-              onChange={(event) => setServerDraft(event.target.value)}
-              aria-label="Nome do servidor"
-            />
-            <button type="submit">Criar</button>
-          </div>
-        </form>
 
         <form className="room-form" onSubmit={saveName}>
           <label htmlFor="name">Seu nome</label>

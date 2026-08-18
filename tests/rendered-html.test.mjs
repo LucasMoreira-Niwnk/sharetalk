@@ -10,7 +10,7 @@ async function render() {
   const { default: worker } = await import(workerUrl.href);
 
   return worker.fetch(
-    new Request("http://localhost/servers/servidor-teste", {
+    new Request("http://localhost/", {
       headers: { accept: "text/html" },
     }),
     {
@@ -38,6 +38,7 @@ test("server-renders the video room shell", async () => {
 
   const html = await response.text();
   assert.match(html, /Papo Vivo/i);
+  assert.match(html, /servidor-amigos/i);
   assert.match(html, /Chamada de video/i);
   assert.match(html, /Canais de texto/i);
   assert.match(html, /Canais de voz/i);
