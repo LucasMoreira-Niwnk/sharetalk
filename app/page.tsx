@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type ChatMessage = {
   id: number;
@@ -27,7 +27,25 @@ type RemotePeer = {
   stream: MediaStream | null;
 };
 
+type DeviceSelections = {
+  audioInputId: string;
+  videoInputId: string;
+  audioOutputId: string;
+};
+
 const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+const DEFAULT_SERVER = "servidor-amigos";
+const TEXT_CHANNELS = [
+  { id: "geral", name: "geral" },
+  { id: "avisos", name: "avisos" },
+  { id: "memes", name: "memes" },
+];
+const VOICE_CHANNELS = [
+  { id: "lounge", name: "Lounge" },
+  { id: "jogos", name: "Jogos" },
+  { id: "estudo", name: "Estudo" },
+];
+const SERVER_STORAGE_KEY = "papo-servidores";
 
 function makeId(prefix: string) {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -37,29 +55,18 @@ function makeId(prefix: string) {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function getInitialRoom() {
-  if (typeof window === "undefined") {
-    return "sala-amigos";
-  }
-
-  const current = new URL(window.location.href);
-  const room = current.searchParams.get("room");
-  if (room) {
-    return room;
-  }
-
-  const generated = `sala-${Math.random().toString(36).slice(2, 8)}`;
-  current.searchParams.set("room", generated);
-  window.history.replaceState(null, "", current);
-  return generated;
+function cleanServerId(value: string) {
+  return value.trim().replace(/[^a-zA-Z0-9_-]/g, "-") || DEFAULT_SERVER;
 }
 
-function getStoredName() {
-  if (typeof window === "undefined") {
-    return "";
-  }
+function getServerFromUrl(current: URL) {
+  const pathMatch = current.pathname.match(/^\/servers\/([^/]+)\/?$/);
+  const pathServer = pathMatch?.[1] ? decodeURIComponent(pathMatch[1]) : "";
+  return pathServer || current.searchParams.get("server") || current.searchParams.get("room") || "";
+}
 
-  return window.localStorage.getItem("papo-nome") ?? "";
+function serverPath(serverId: string) {
+  return `/servers/${encodeURIComponent(serverId)}`;
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -79,10 +86,15 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export default function Home() {
-  const [roomId, setRoomId] = useState(getInitialRoom);
-  const [clientId] = useState(() => makeId("pessoa"));
-  const [name, setName] = useState(getStoredName);
-  const [draftName, setDraftName] = useState(getStoredName);
+  const [isReady, setIsReady] = useState(false);
+  const [serverId, setServerId] = useState(DEFAULT_SERVER);
+  const [serverDraft, setServerDraft] = useState(DEFAULT_SERVER);
+  const [servers, setServers] = useState<string[]>([DEFAULT_SERVER]);
+  const [selectedTextChannel, setSelectedTextChannel] = useState(TEXT_CHANNELS[0].id);
+  const [selectedVoiceChannel, setSelectedVoiceChannel] = useState(VOICE_CHANNELS[0].id);
+  const [clientId, setClientId] = useState("");
+  const [name, setName] = useState("");
+  const [draftName, setDraftName] = useState("");
   const [draftMessage, setDraftMessage] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [remotePeers, setRemotePeers] = useState<RemotePeer[]>([]);
@@ -90,39 +102,120 @@ export default function Home() {
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const [cameraOn, setCameraOn] = useState(false);
   const [micOn, setMicOn] = useState(true);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [audioMuted, setAudioMuted] = useState(false);
+  const [devicesOpen, setDevicesOpen] = useState(false);
+  const [spotlightId, setSpotlightId] = useState("");
+  const [mediaDevices, setMediaDevices] = useState<MediaDeviceInfo[]>([]);
+  const [deviceSelections, setDeviceSelections] = useState<DeviceSelections>({
+    audioInputId: "",
+    videoInputId: "",
+    audioOutputId: "",
+  });
   const [status, setStatus] = useState("Entre com camera ou microfone para iniciar.");
   const [error, setError] = useState("");
   const [lastSignalId, setLastSignalId] = useState(0);
 
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const localStreamRef = useRef<MediaStream | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const knownSignalsRef = useRef<Set<number>>(new Set());
 
-  const roomLink = useMemo(() => {
+  useEffect(() => {
+    const current = new URL(window.location.href);
+    const existingServer = getServerFromUrl(current);
+    const nextServer = cleanServerId(existingServer || `servidor-${Math.random().toString(36).slice(2, 8)}`);
+
+    if (current.pathname !== serverPath(nextServer) || current.searchParams.has("server") || current.searchParams.has("room")) {
+      window.history.replaceState(null, "", serverPath(nextServer));
+    }
+
+    const storedName = window.localStorage.getItem("papo-nome") ?? "";
+    const storedServers = JSON.parse(window.localStorage.getItem(SERVER_STORAGE_KEY) ?? "[]") as string[];
+    const nextServers = Array.from(new Set([nextServer, DEFAULT_SERVER, ...storedServers.map(cleanServerId)]));
+    window.localStorage.setItem(SERVER_STORAGE_KEY, JSON.stringify(nextServers));
+    setClientId(makeId("pessoa"));
+    setServerId(nextServer);
+    setServerDraft(nextServer);
+    setServers(nextServers);
+    setName(storedName);
+    setDraftName(storedName);
+    setIsReady(true);
+  }, []);
+
+  const textRoomKey = `${serverId}:texto:${selectedTextChannel}`;
+  const voiceRoomKey = `${serverId}:voz:${selectedVoiceChannel}`;
+  const currentTextChannel = TEXT_CHANNELS.find((channel) => channel.id === selectedTextChannel) ?? TEXT_CHANNELS[0];
+  const currentVoiceChannel = VOICE_CHANNELS.find((channel) => channel.id === selectedVoiceChannel) ?? VOICE_CHANNELS[0];
+
+  const serverLink = useMemo(() => {
     if (typeof window === "undefined") {
       return "";
     }
 
-    const url = new URL(window.location.href);
-    url.searchParams.set("room", roomId);
-    return url.toString();
-  }, [roomId]);
+    return new URL(serverPath(serverId), window.location.origin).toString();
+  }, [serverId]);
 
   useEffect(() => {
     localStreamRef.current = localStream;
   }, [localStream]);
 
   useEffect(() => {
+    screenStreamRef.current = screenStream;
+  }, [screenStream]);
+
+  useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
 
+  useEffect(() => {
+    if (!localStream || !micOn) {
+      setIsSpeaking(false);
+      return undefined;
+    }
+
+    const audioContext = new AudioContext();
+    const source = audioContext.createMediaStreamSource(localStream);
+    const analyser = audioContext.createAnalyser();
+    let animationFrame = 0;
+
+    analyser.fftSize = 512;
+    const data = new Uint8Array(analyser.fftSize);
+    source.connect(analyser);
+
+    const measure = () => {
+      analyser.getByteTimeDomainData(data);
+      let total = 0;
+      for (const value of data) {
+        const centered = value - 128;
+        total += centered * centered;
+      }
+      const volume = Math.sqrt(total / data.length);
+      setIsSpeaking(volume > 8);
+      animationFrame = window.requestAnimationFrame(measure);
+    };
+
+    measure();
+
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+      source.disconnect();
+      audioContext.close().catch(() => undefined);
+      setIsSpeaking(false);
+    };
+  }, [localStream, micOn]);
+
   const postSignal = useCallback(
     async (kind: SignalMessage["kind"], payload: Record<string, unknown>, recipientId?: string) => {
+      if (!clientId) {
+        return;
+      }
+
       await api<{ ok: boolean }>("/api/signals", {
         method: "POST",
         body: JSON.stringify({
-          roomId,
+          roomId: voiceRoomKey,
           senderId: clientId,
           recipientId: recipientId ?? null,
           kind,
@@ -130,8 +223,14 @@ export default function Home() {
         }),
       });
     },
-    [clientId, roomId],
+    [clientId, voiceRoomKey],
   );
+
+  useEffect(() => {
+    if (isReady && localStream && clientId) {
+      postSignal("join", { name: name || "Amigo" }).catch(() => undefined);
+    }
+  }, [clientId, isReady, localStream, name, postSignal, selectedVoiceChannel]);
 
   const createPeer = useCallback(
     (peerId: string, peerName: string) => {
@@ -182,33 +281,141 @@ export default function Home() {
 
   const replaceVideoTrack = useCallback((track: MediaStreamTrack | null) => {
     peersRef.current.forEach((peer) => {
+      if (peer.connectionState === "closed" || peer.signalingState === "closed") {
+        peersRef.current.forEach((candidate, id) => {
+          if (candidate === peer) {
+            peersRef.current.delete(id);
+          }
+        });
+        return;
+      }
+
       const sender = peer.getSenders().find((item) => item.track?.kind === "video");
       if (sender) {
-        sender.replaceTrack(track);
+        sender.replaceTrack(track).catch(() => {
+          if (peer.connectionState === "closed" || peer.signalingState === "closed") {
+            peersRef.current.forEach((candidate, id) => {
+              if (candidate === peer) {
+                peersRef.current.delete(id);
+              }
+            });
+          }
+        });
       } else if (track && localStreamRef.current) {
-        peer.addTrack(track, localStreamRef.current);
+        try {
+          peer.addTrack(track, localStreamRef.current);
+        } catch {
+          peersRef.current.forEach((candidate, id) => {
+            if (candidate === peer) {
+              peersRef.current.delete(id);
+            }
+          });
+        }
       }
     });
   }, []);
 
+  const replaceAudioTrack = useCallback((track: MediaStreamTrack | null) => {
+    peersRef.current.forEach((peer) => {
+      if (peer.connectionState === "closed" || peer.signalingState === "closed") {
+        return;
+      }
+
+      const sender = peer.getSenders().find((item) => item.track?.kind === "audio");
+      if (sender) {
+        sender.replaceTrack(track).catch(() => undefined);
+      } else if (track && localStreamRef.current) {
+        try {
+          peer.addTrack(track, localStreamRef.current);
+        } catch {
+          // Closed peer; it will be removed by the connection state handler.
+        }
+      }
+    });
+  }, []);
+
+  const refreshDevices = useCallback(async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) {
+      return;
+    }
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    setMediaDevices(devices);
+  }, []);
+
+  const getMediaConstraints = useCallback((): MediaStreamConstraints => {
+    return {
+      audio: deviceSelections.audioInputId
+        ? { deviceId: { exact: deviceSelections.audioInputId } }
+        : true,
+      video: deviceSelections.videoInputId
+        ? { deviceId: { exact: deviceSelections.videoInputId } }
+        : true,
+    };
+  }, [deviceSelections.audioInputId, deviceSelections.videoInputId]);
+
+  const applySelectedDevices = useCallback(async () => {
+    setError("");
+    if (!localStreamRef.current) {
+      await refreshDevices();
+      setStatus("Dispositivos selecionados para a proxima entrada no canal.");
+      return null;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints());
+      const previousStream = localStreamRef.current;
+      previousStream?.getTracks().forEach((track) => track.stop());
+      setLocalStream(stream);
+      setCameraOn(Boolean(stream.getVideoTracks()[0]?.enabled));
+      setMicOn(Boolean(stream.getAudioTracks()[0]?.enabled));
+      replaceAudioTrack(stream.getAudioTracks()[0] ?? null);
+      replaceVideoTrack(screenStreamRef.current?.getVideoTracks()[0] ?? stream.getVideoTracks()[0] ?? null);
+      await refreshDevices();
+      setStatus("Dispositivos atualizados.");
+      return stream;
+    } catch {
+      setError("Nao consegui usar os dispositivos selecionados.");
+      return null;
+    }
+  }, [getMediaConstraints, refreshDevices, replaceAudioTrack, replaceVideoTrack]);
+
   const ensureMedia = useCallback(async () => {
     setError("");
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints());
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: deviceSelections.audioInputId
+            ? { deviceId: { exact: deviceSelections.audioInputId } }
+            : true,
+          video: false,
+        });
+        setStatus("Conectado apenas com microfone.");
+      }
       setLocalStream(stream);
-      setCameraOn(true);
-      setMicOn(true);
-      setStatus("Camera e microfone conectados.");
+      setCameraOn(Boolean(stream.getVideoTracks()[0]?.enabled));
+      setMicOn(Boolean(stream.getAudioTracks()[0]?.enabled));
+      if (stream.getVideoTracks().length > 0) {
+        setStatus("Camera e microfone conectados.");
+      }
+      await refreshDevices();
       await postSignal("join", { name: name || "Amigo" });
       return stream;
     } catch {
-      setError("Permita camera e microfone no navegador para entrar na chamada.");
-      throw new Error("media-denied");
+      setError("Permita camera ou microfone no navegador para entrar na chamada.");
+      return null;
     }
-  }, [name, postSignal]);
+  }, [deviceSelections.audioInputId, getMediaConstraints, name, postSignal, refreshDevices]);
 
   const joinCall = useCallback(async () => {
     const stream = localStreamRef.current ?? (await ensureMedia());
+    if (!stream) {
+      return;
+    }
+
     peersRef.current.forEach((peer) => {
       stream.getTracks().forEach((track) => {
         if (!peer.getSenders().some((sender) => sender.track === track)) {
@@ -217,8 +424,8 @@ export default function Home() {
       });
     });
     await postSignal("join", { name: name || "Amigo" });
-    setStatus("Na sala. Envie o link para seus amigos.");
-  }, [ensureMedia, name, postSignal]);
+    setStatus(`Conectado ao canal de voz ${currentVoiceChannel.name}.`);
+  }, [currentVoiceChannel.name, ensureMedia, name, postSignal]);
 
   const handleSignal = useCallback(
     async (signal: SignalMessage) => {
@@ -274,11 +481,15 @@ export default function Home() {
   );
 
   useEffect(() => {
+    if (!isReady) {
+      return undefined;
+    }
+
     let cancelled = false;
 
     async function loadMessages() {
       try {
-        const result = await api<{ messages: ChatMessage[] }>(`/api/messages?roomId=${encodeURIComponent(roomId)}`);
+        const result = await api<{ messages: ChatMessage[] }>(`/api/messages?roomId=${encodeURIComponent(textRoomKey)}`);
         if (!cancelled) {
           setMessages(result.messages);
         }
@@ -295,15 +506,19 @@ export default function Home() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [roomId]);
+  }, [isReady, textRoomKey]);
 
   useEffect(() => {
+    if (!isReady || !clientId) {
+      return undefined;
+    }
+
     let cancelled = false;
 
     async function pollSignals() {
       try {
         const result = await api<{ signals: SignalMessage[]; lastId: number }>(
-          `/api/signals?roomId=${encodeURIComponent(roomId)}&after=${lastSignalId}`,
+          `/api/signals?roomId=${encodeURIComponent(voiceRoomKey)}&after=${lastSignalId}`,
         );
         if (cancelled) {
           return;
@@ -314,7 +529,7 @@ export default function Home() {
         setLastSignalId(result.lastId);
       } catch {
         if (!cancelled) {
-          setError("A sala perdeu a sincronizacao por um momento.");
+          setError("O canal de voz perdeu a sincronizacao por um momento.");
         }
       }
     }
@@ -325,16 +540,15 @@ export default function Home() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [handleSignal, lastSignalId, roomId]);
+  }, [clientId, handleSignal, isReady, lastSignalId, voiceRoomKey]);
 
   useEffect(() => {
     return () => {
-      postSignal("leave", { name: name || "Amigo" }).catch(() => undefined);
       localStreamRef.current?.getTracks().forEach((track) => track.stop());
-      screenStream?.getTracks().forEach((track) => track.stop());
+      screenStreamRef.current?.getTracks().forEach((track) => track.stop());
       peersRef.current.forEach((peer) => peer.close());
     };
-  }, [name, postSignal, screenStream]);
+  }, []);
 
   async function saveName(event: FormEvent) {
     event.preventDefault();
@@ -355,7 +569,7 @@ export default function Home() {
     const result = await api<{ message: ChatMessage }>("/api/messages", {
       method: "POST",
       body: JSON.stringify({
-        roomId,
+        roomId: textRoomKey,
         authorId: clientId,
         authorName: name || "Amigo",
         body,
@@ -382,6 +596,21 @@ export default function Home() {
     setCameraOn(videoTrack.enabled);
   }
 
+  function disconnectCall() {
+    postSignal("leave", { name: name || "Amigo" }).catch(() => undefined);
+    localStreamRef.current?.getTracks().forEach((track) => track.stop());
+    screenStream?.getTracks().forEach((track) => track.stop());
+    peersRef.current.forEach((peer) => peer.close());
+    peersRef.current.clear();
+    setLocalStream(null);
+    setScreenStream(null);
+    setRemotePeers([]);
+    setSpotlightId("");
+    setCameraOn(false);
+    setMicOn(false);
+    setStatus("Desconectado da chamada.");
+  }
+
   async function shareScreen() {
     setError("");
     if (screenStream) {
@@ -398,7 +627,11 @@ export default function Home() {
       const [track] = stream.getVideoTracks();
       replaceVideoTrack(track);
       track.onended = () => {
-        replaceVideoTrack(localStreamRef.current?.getVideoTracks()[0] ?? null);
+        try {
+          replaceVideoTrack(localStreamRef.current?.getVideoTracks()[0] ?? null);
+        } catch {
+          setError("A conexao de video ja tinha sido encerrada.");
+        }
         setScreenStream(null);
       };
       setScreenStream(stream);
@@ -409,82 +642,354 @@ export default function Home() {
   }
 
   async function copyRoomLink() {
-    await navigator.clipboard.writeText(roomLink);
-    setStatus("Link copiado.");
+    await navigator.clipboard.writeText(serverLink);
+    setStatus("Link do servidor copiado.");
   }
 
-  function changeRoom(event: FormEvent) {
+  function changeServer(event: FormEvent) {
     event.preventDefault();
-    const form = event.currentTarget as HTMLFormElement;
-    const input = form.elements.namedItem("room") as HTMLInputElement;
-    const cleanRoom = input.value.trim().replace(/[^a-zA-Z0-9_-]/g, "-") || "sala-amigos";
-    const url = new URL(window.location.href);
-    url.searchParams.set("room", cleanRoom);
-    window.history.replaceState(null, "", url);
+    openServer(cleanServerId(serverDraft));
+  }
+
+  function openServer(cleanServer: string) {
+    window.history.pushState(null, "", serverPath(cleanServer));
     peersRef.current.forEach((peer) => peer.close());
     peersRef.current.clear();
     setRemotePeers([]);
     setLastSignalId(0);
     knownSignalsRef.current.clear();
-    setRoomId(cleanRoom);
-    setStatus("Sala trocada.");
+    setSpotlightId("");
+    setServerId(cleanServer);
+    setServerDraft(cleanServer);
+    setServers((items) => {
+      const nextServers = Array.from(new Set([cleanServer, ...items]));
+      window.localStorage.setItem(SERVER_STORAGE_KEY, JSON.stringify(nextServers));
+      return nextServers;
+    });
+    setMessages([]);
+    setStatus("Servidor trocado.");
+  }
+
+  function switchTextChannel(channelId: string) {
+    setSelectedTextChannel(channelId);
+    setMessages([]);
+    setStatus(`Canal #${channelId} aberto.`);
+  }
+
+  function switchVoiceChannel(channelId: string) {
+    if (channelId === selectedVoiceChannel) {
+      return;
+    }
+
+    postSignal("leave", { name: name || "Amigo" }).catch(() => undefined);
+    peersRef.current.forEach((peer) => peer.close());
+    peersRef.current.clear();
+    setRemotePeers([]);
+    setLastSignalId(0);
+    knownSignalsRef.current.clear();
+    setSpotlightId("");
+    setSelectedVoiceChannel(channelId);
+    setStatus(`Canal de voz ${VOICE_CHANNELS.find((channel) => channel.id === channelId)?.name ?? channelId} selecionado.`);
   }
 
   const visibleName = name || "Amigo";
+  const localPreviewStream = screenStream ?? localStream;
+  const localPreviewLabel = screenStream ? `${visibleName} (sua tela)` : `${visibleName} (voce)`;
+  const localVideoVisible = Boolean(screenStream || (localStream && cameraOn));
+  const isConnected = Boolean(localStream);
+  const connectionLabel = isConnected ? "Conectado" : "Desconectado";
+  const activeParticipants = remotePeers.length + (isConnected ? 1 : 0);
+  const audioInputDevices = mediaDevices.filter((device) => device.kind === "audioinput");
+  const videoInputDevices = mediaDevices.filter((device) => device.kind === "videoinput");
+  const audioOutputDevices = mediaDevices.filter((device) => device.kind === "audiooutput");
+  const localTileId = "local";
+  const videoTiles = [
+    {
+      id: localTileId,
+      stream: localPreviewStream,
+      label: localPreviewLabel,
+      muted: true,
+      active: localVideoVisible,
+      micOn: micOn && isConnected,
+      cameraOn: localVideoVisible,
+      connectionLabel,
+      isSpeaking: isSpeaking && micOn && isConnected,
+      audioOutputId: "",
+    },
+    ...remotePeers.map((peer) => ({
+      id: peer.id,
+      stream: peer.stream,
+      label: peer.name,
+      muted: audioMuted,
+      active: Boolean(peer.stream),
+      micOn: true,
+      cameraOn: Boolean(peer.stream),
+      connectionLabel: peer.stream ? "Conectado" : "Conectando",
+      isSpeaking: false,
+      audioOutputId: deviceSelections.audioOutputId,
+    })),
+  ];
+  const spotlightTile = videoTiles.find((tile) => tile.id === spotlightId && tile.active) ?? null;
+  const voiceParticipants = [
+    ...(isConnected ? [{ id: clientId || "local", name: visibleName, isLocal: true }] : []),
+    ...remotePeers.map((peer) => ({ id: peer.id, name: peer.name, isLocal: false })),
+  ];
 
   return (
     <main className="app-shell">
+      <nav className="server-rail" aria-label="Navegacao de servidores">
+        <div className="server-mark">PV</div>
+        {servers.map((server) => (
+          <button
+            type="button"
+            key={server}
+            className={`server-bubble ${server === serverId ? "is-active" : ""}`}
+            title={server}
+            onClick={() => openServer(server)}
+          >
+            {server.slice(0, 2).toUpperCase()}
+          </button>
+        ))}
+      </nav>
+
+      <aside className="channel-sidebar" aria-label="Canais do servidor">
+        <div className="server-header">
+          <span>Servidor</span>
+          <strong>{serverId}</strong>
+        </div>
+
+        <section className="channel-section" aria-label="Canais de texto">
+          <div className="channel-heading">Texto</div>
+          {TEXT_CHANNELS.map((channel) => (
+            <button
+              type="button"
+              key={channel.id}
+              className={`channel-button ${selectedTextChannel === channel.id ? "is-selected" : ""}`}
+              onClick={() => switchTextChannel(channel.id)}
+            >
+              <span>#</span>
+              {channel.name}
+            </button>
+          ))}
+        </section>
+
+        <section className="channel-section" aria-label="Canais de voz">
+          <div className="channel-heading">Voz</div>
+          {VOICE_CHANNELS.map((channel) => (
+            <div className="voice-channel-group" key={channel.id}>
+              <button
+                type="button"
+                className={`channel-button voice-channel ${selectedVoiceChannel === channel.id ? "is-selected" : ""}`}
+                onClick={() => switchVoiceChannel(channel.id)}
+              >
+                <span>◉</span>
+                {channel.name}
+              </button>
+              {selectedVoiceChannel === channel.id && voiceParticipants.length > 0 ? (
+                <div className="voice-participants">
+                  {voiceParticipants.map((participant) => (
+                    <div className="voice-participant" key={participant.id}>
+                      <span>{participant.name.slice(0, 1).toUpperCase()}</span>
+                      <p>{participant.name}{participant.isLocal ? " (voce)" : ""}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ))}
+        </section>
+      </aside>
+
       <section className="call-area" aria-label="Chamada de video">
         <header className="topbar">
           <div>
             <p className="eyebrow">Papo ao vivo</p>
-            <h1>Sala {roomId}</h1>
+            <h1>{serverId}</h1>
+            <div className="status-pills" aria-label="Status da chamada">
+              <span className={`status-pill ${isConnected ? "is-online" : "is-offline"}`}>
+                {connectionLabel}
+              </span>
+              <span className={`status-pill ${micOn && isConnected ? "is-online" : "is-muted"}`}>
+                Mic {micOn && isConnected ? "ligado" : "mudo"}
+              </span>
+              <span className={`status-pill ${cameraOn && isConnected ? "is-online" : "is-muted"}`}>
+                Cam {cameraOn && isConnected ? "ligada" : "pausada"}
+              </span>
+            </div>
           </div>
           <div className="top-actions">
             <button type="button" className="ghost-button" onClick={copyRoomLink}>
-              Copiar link
+              Copiar servidor
             </button>
-            <button type="button" className="primary-button" onClick={joinCall}>
-              Entrar
-            </button>
+            {!isConnected ? (
+              <button type="button" className="primary-button" onClick={joinCall} disabled={!isReady}>
+                Entrar no canal
+              </button>
+            ) : null}
           </div>
         </header>
 
-        <div className="video-grid">
-          <VideoTile stream={localStream} label={`${visibleName} (voce)`} muted active={Boolean(localStream)} />
-          {remotePeers.map((peer) => (
-            <VideoTile key={peer.id} stream={peer.stream} label={peer.name} active={Boolean(peer.stream)} />
-          ))}
-          {remotePeers.length === 0 ? (
-            <div className="empty-tile">
-              <span>Esperando amigos</span>
-            </div>
+        <div className="stage-area">
+          {spotlightTile ? (
+            <VideoTile
+              key={`spotlight-${spotlightTile.id}`}
+              stream={spotlightTile.stream}
+              label={spotlightTile.label}
+              muted={spotlightTile.muted}
+              active={spotlightTile.active}
+              micOn={spotlightTile.micOn}
+              cameraOn={spotlightTile.cameraOn}
+              connectionLabel={spotlightTile.connectionLabel}
+              isSpeaking={spotlightTile.isSpeaking}
+              audioOutputId={spotlightTile.audioOutputId}
+              isSpotlight
+              isSelected
+            />
           ) : null}
+
+          <div className={`video-grid ${spotlightTile ? "has-spotlight" : ""}`}>
+            {videoTiles.map((tile) => (
+              <VideoTile
+                key={`${tile.id}-${tile.id === localTileId && screenStream ? "screen" : "camera"}`}
+                stream={tile.stream}
+                label={tile.label}
+                muted={tile.muted}
+                active={tile.active}
+                micOn={tile.micOn}
+                cameraOn={tile.cameraOn}
+                connectionLabel={tile.connectionLabel}
+                isSpeaking={tile.isSpeaking}
+                audioOutputId={tile.audioOutputId}
+                isSelected={spotlightId === tile.id && tile.active}
+                onSelect={tile.active ? () => setSpotlightId((current) => (current === tile.id ? "" : tile.id)) : undefined}
+              />
+            ))}
+            {remotePeers.length === 0 ? (
+            <div className="empty-tile">
+              <div>
+                <strong>{isConnected ? `Canal ${currentVoiceChannel.name}` : "Voce esta desconectado"}</strong>
+                <p>{isConnected ? "Convide amigos para o servidor." : "Entre em um canal de voz para falar."}</p>
+              </div>
+            </div>
+            ) : null}
+          </div>
         </div>
 
-        <div className="control-bar" aria-label="Controles da chamada">
-          <button type="button" onClick={toggleMic} disabled={!localStream}>
-            {micOn ? "Microfone ligado" : "Microfone mudo"}
-          </button>
-          <button type="button" onClick={toggleCamera} disabled={!localStream}>
-            {cameraOn ? "Camera ligada" : "Camera pausada"}
-          </button>
-          <button type="button" onClick={shareScreen}>
-            {screenStream ? "Parar tela" : "Compartilhar tela"}
-          </button>
-        </div>
+        {isConnected ? (
+          <div className="control-bar" aria-label="Controles da chamada">
+            <button type="button" className={`icon-button ${micOn ? "control-on" : "control-off"}`} onClick={toggleMic} aria-label={micOn ? "Mutar microfone" : "Ativar microfone"} title={micOn ? "Mutar microfone" : "Ativar microfone"}>
+              <span className="icon icon-mic" />
+            </button>
+            <button type="button" className={`icon-button ${cameraOn ? "control-on" : "control-off"}`} onClick={toggleCamera} aria-label={cameraOn ? "Pausar camera" : "Ativar camera"} title={cameraOn ? "Pausar camera" : "Ativar camera"}>
+              <span className="icon icon-camera" />
+            </button>
+            <button type="button" className={`icon-button ${screenStream ? "control-on" : ""}`} onClick={shareScreen} aria-label={screenStream ? "Parar compartilhamento" : "Compartilhar tela"} title={screenStream ? "Parar compartilhamento" : "Compartilhar tela"}>
+              <span className="icon icon-screen" />
+            </button>
+            <button type="button" className={`icon-button ${audioMuted ? "control-off" : ""}`} onClick={() => setAudioMuted((value) => !value)} aria-label={audioMuted ? "Ouvir amigos" : "Mutar audio dos amigos"} title={audioMuted ? "Ouvir amigos" : "Mutar audio dos amigos"}>
+              <span className="icon icon-audio" />
+            </button>
+            <button type="button" className="icon-button danger-button" onClick={disconnectCall} aria-label="Sair do canal" title="Sair do canal">
+              <span className="icon icon-phone" />
+            </button>
+          </div>
+        ) : null}
 
         <div className="status-line" role={error ? "alert" : "status"}>
           {error || status}
         </div>
       </section>
 
-      <aside className="side-panel" aria-label="Chat e sala">
-        <form className="room-form" onSubmit={changeRoom}>
-          <label htmlFor="room">Sala</label>
+      <aside className="side-panel" aria-label="Chat e servidor">
+        <section className="voice-card" aria-label="Resumo do canal de voz">
+          <div className="voice-card-main">
+            <div>
+              <span className={`presence-dot ${isConnected ? "is-online" : "is-offline"}`} />
+              <strong>{currentVoiceChannel.name}</strong>
+            </div>
+            <p>{connectionLabel} · {activeParticipants} na voz</p>
+          </div>
+          <button
+            type="button"
+            className="icon-button compact"
+            aria-label="Selecionar dispositivos"
+            title="Selecionar dispositivos"
+            onClick={() => {
+              setDevicesOpen((value) => !value);
+              refreshDevices().catch(() => undefined);
+            }}
+          >
+            <span className="icon icon-settings" />
+          </button>
+        </section>
+
+        {devicesOpen ? (
+          <section className="device-panel" aria-label="Dispositivos de audio e video">
+            <div className="device-head">
+              <h2>Dispositivos</h2>
+              <button type="button" className="icon-button compact" onClick={() => setDevicesOpen(false)} aria-label="Fechar dispositivos" title="Fechar">
+                <span className="icon icon-close" />
+              </button>
+            </div>
+            <label htmlFor="audio-input">Microfone</label>
+            <select
+              id="audio-input"
+              value={deviceSelections.audioInputId}
+              onChange={(event) => setDeviceSelections((value) => ({ ...value, audioInputId: event.target.value }))}
+            >
+              <option value="">Padrao do navegador</option>
+              {audioInputDevices.map((device, index) => (
+                <option value={device.deviceId} key={device.deviceId}>
+                  {device.label || `Microfone ${index + 1}`}
+                </option>
+              ))}
+            </select>
+
+            <label htmlFor="video-input">Camera</label>
+            <select
+              id="video-input"
+              value={deviceSelections.videoInputId}
+              onChange={(event) => setDeviceSelections((value) => ({ ...value, videoInputId: event.target.value }))}
+            >
+              <option value="">Padrao do navegador</option>
+              {videoInputDevices.map((device, index) => (
+                <option value={device.deviceId} key={device.deviceId}>
+                  {device.label || `Camera ${index + 1}`}
+                </option>
+              ))}
+            </select>
+
+            <label htmlFor="audio-output">Saida de audio</label>
+            <select
+              id="audio-output"
+              value={deviceSelections.audioOutputId}
+              onChange={(event) => setDeviceSelections((value) => ({ ...value, audioOutputId: event.target.value }))}
+            >
+              <option value="">Padrao do navegador</option>
+              {audioOutputDevices.map((device, index) => (
+                <option value={device.deviceId} key={device.deviceId}>
+                  {device.label || `Saida ${index + 1}`}
+                </option>
+              ))}
+            </select>
+
+            <button type="button" onClick={() => applySelectedDevices().catch(() => undefined)}>
+              Aplicar dispositivos
+            </button>
+          </section>
+        ) : null}
+
+        <form className="room-form" onSubmit={changeServer}>
+          <label htmlFor="server">Criar ou abrir servidor</label>
           <div className="inline-fields">
-            <input id="room" name="room" defaultValue={roomId} aria-label="Nome da sala" />
-            <button type="submit">Abrir</button>
+            <input
+              id="server"
+              name="server"
+              value={serverDraft}
+              onChange={(event) => setServerDraft(event.target.value)}
+              aria-label="Nome do servidor"
+            />
+            <button type="submit">Criar</button>
           </div>
         </form>
 
@@ -503,7 +1008,7 @@ export default function Home() {
 
         <section className="chat-panel" aria-label="Chat persistente">
           <div className="chat-head">
-            <h2>Chat</h2>
+            <h2>#{currentTextChannel.name}</h2>
             <span>{messages.length} mensagens</span>
           </div>
           <div className="messages">
@@ -550,13 +1055,30 @@ function VideoTile({
   label,
   muted = false,
   active,
+  micOn,
+  cameraOn,
+  connectionLabel,
+  isSpeaking = false,
+  audioOutputId = "",
+  isSpotlight = false,
+  isSelected = false,
+  onSelect,
 }: {
   stream: MediaStream | null;
   label: string;
   muted?: boolean;
   active: boolean;
+  micOn: boolean;
+  cameraOn: boolean;
+  connectionLabel: string;
+  isSpeaking?: boolean;
+  audioOutputId?: string;
+  isSpotlight?: boolean;
+  isSelected?: boolean;
+  onSelect?: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const tileRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (videoRef.current) {
@@ -564,10 +1086,56 @@ function VideoTile({
     }
   }, [stream]);
 
+  useEffect(() => {
+    const video = videoRef.current as (HTMLVideoElement & {
+      setSinkId?: (sinkId: string) => Promise<void>;
+    }) | null;
+
+    if (video?.setSinkId) {
+      video.setSinkId(audioOutputId).catch(() => undefined);
+    }
+  }, [audioOutputId]);
+
+  function openFullscreen(event: MouseEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+    tileRef.current?.requestFullscreen?.().catch(() => undefined);
+  }
+
   return (
-    <div className={`video-tile ${active ? "is-active" : ""}`}>
+    <div
+      ref={tileRef}
+      className={`video-tile ${active ? "is-active" : ""} ${isSpeaking ? "is-speaking" : ""} ${isSpotlight ? "is-spotlight" : ""} ${isSelected ? "is-selected" : ""} ${onSelect ? "is-selectable" : ""}`}
+      role={onSelect ? "button" : undefined}
+      tabIndex={onSelect ? 0 : undefined}
+      onClick={onSelect}
+      onKeyDown={(event) => {
+        if (onSelect && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          onSelect();
+        }
+      }}
+      aria-label={onSelect ? `Destacar ${label}` : undefined}
+      title={onSelect ? `Destacar ${label}` : undefined}
+    >
       <video ref={videoRef} autoPlay playsInline muted={muted} />
-      <span>{label}</span>
+      {!active ? <div className="avatar-fallback">{label.slice(0, 1).toUpperCase()}</div> : null}
+      <div className="tile-badges">
+        <span className={connectionLabel === "Conectado" ? "badge-online" : "badge-offline"}>{connectionLabel}</span>
+        <span className={micOn ? "badge-online" : "badge-muted"}>{micOn ? "Mic" : "Mudo"}</span>
+        <span className={cameraOn ? "badge-online" : "badge-muted"}>{cameraOn ? "Cam" : "Sem cam"}</span>
+      </div>
+      <span className="tile-name">{label}</span>
+      {active ? (
+        <button
+          type="button"
+          className="fullscreen-button"
+          onClick={openFullscreen}
+          aria-label={`Abrir ${label} em tela cheia`}
+          title="Tela cheia"
+        >
+          <span className="icon icon-fullscreen" />
+        </button>
+      ) : null}
     </div>
   );
 }
