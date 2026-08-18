@@ -54,11 +54,6 @@ test("uses local persistence when D1 is unavailable", async () => {
     const workerUrl = new URL("../dist/server/index.js", import.meta.url);
     workerUrl.searchParams.set("local", `${process.pid}-${Date.now()}`);
     const { default: worker } = await import(workerUrl.href);
-    const env = {
-      ASSETS: {
-        fetch: async () => new Response("Not found", { status: 404 }),
-      },
-    };
     const ctx = {
       waitUntil() {},
       passThroughOnException() {},
@@ -75,7 +70,7 @@ test("uses local persistence when D1 is unavailable", async () => {
           body: "Teste local",
         }),
       }),
-      env,
+      undefined,
       ctx,
     );
 
@@ -83,7 +78,7 @@ test("uses local persistence when D1 is unavailable", async () => {
 
     const loaded = await worker.fetch(
       new Request("http://localhost/api/messages?roomId=Servidor-thoseguys%3Atexto%3Ageral"),
-      env,
+      undefined,
       ctx,
     );
     assert.equal(loaded.status, 200);

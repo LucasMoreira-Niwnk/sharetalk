@@ -249,8 +249,8 @@ function toSignal(row: SignalRow) {
   };
 }
 
-async function handleMessages(request: Request, env: Env) {
-  if (!env.DB) {
+async function handleMessages(request: Request, env?: Env) {
+  if (!env?.DB) {
     return handleLocalMessages(request);
   }
 
@@ -298,8 +298,8 @@ async function handleMessages(request: Request, env: Env) {
   return json({ error: "Metodo nao permitido." }, 405);
 }
 
-async function handleSignals(request: Request, env: Env) {
-  if (!env.DB) {
+async function handleSignals(request: Request, env?: Env) {
+  if (!env?.DB) {
     return handleLocalSignals(request);
   }
 
