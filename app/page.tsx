@@ -125,6 +125,7 @@ export default function Home() {
   const [micOn, setMicOn] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [audioMuted, setAudioMuted] = useState(false);
+  const [peerVolumes, setPeerVolumes] = useState<Record<string, number>>({});
   const [devicesOpen, setDevicesOpen] = useState(false);
   const [spotlightId, setSpotlightId] = useState("");
   const [mediaAccessStatus, setMediaAccessStatus] = useState<"unknown" | "granted" | "insecure" | "unsupported" | "denied">("unknown");
@@ -922,7 +923,7 @@ export default function Home() {
               peer.connectionState === "disconnected";
             const lastRequest = connectionRequestsRef.current.get(participant.clientId) ?? 0;
 
-            if (needsConnection && now - lastRequest > 5000) {
+            if (needsConnection && now - lastRequest > 2500) {
               connectionRequestsRef.current.set(participant.clientId, now);
               postSignal(
                 "join",
@@ -945,7 +946,7 @@ export default function Home() {
     }
 
     loadPresence();
-    const interval = window.setInterval(loadPresence, 2000);
+    const interval = window.setInterval(loadPresence, 1200);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
@@ -960,7 +961,7 @@ export default function Home() {
     postPresence().catch(() => undefined);
     const interval = window.setInterval(() => {
       postPresence().catch(() => undefined);
-    }, 3000);
+    }, 2000);
 
     return () => {
       window.clearInterval(interval);
@@ -1164,7 +1165,7 @@ export default function Home() {
   const localVideoVisible = Boolean(screenStream || (localStream && cameraOn));
   const isConnected = Boolean(localStream);
   const connectionLabel = isConnected ? "Conectado" : "Desconectado";
-  const activeParticipants = remotePeers.length + (isConnected ? 1 : 0);
+  const activeParticipants = presenceParticipants.length || (remotePeers.length + (isConnected ? 1 : 0));
   const audioInputDevices = mediaDevices.filter((device) => device.kind === "audioinput");
   const videoInputDevices = mediaDevices.filter((device) => device.kind === "videoinput");
   const audioOutputDevices = mediaDevices.filter((device) => device.kind === "audiooutput");
@@ -1181,11 +1182,13 @@ export default function Home() {
       connectionLabel,
       isSpeaking: isSpeaking && micOn && isConnected,
       audioOutputId: "",
+      volume: 0,
+      canControlVolume: false,
     },
     ...remotePeers.map((peer) => ({
       id: peer.id,
       stream: peer.stream,
-      label: peer.name,
+      label: peer.screenOn ? `${peer.name} (tela)` : peer.name,
       muted: audioMuted,
       active: Boolean(peer.stream && (peer.cameraOn || peer.screenOn) && peer.stream.getVideoTracks().some((track) => track.readyState === "live")),
       micOn: peer.micOn,
@@ -1193,6 +1196,8 @@ export default function Home() {
       connectionLabel: peer.stream ? "Conectado" : "Conectando",
       isSpeaking: false,
       audioOutputId: deviceSelections.audioOutputId,
+      volume: peerVolumes[peer.id] ?? 1,
+      canControlVolume: true,
     })),
   ];
   const spotlightTile = videoTiles.find((tile) => tile.id === spotlightId && tile.active) ?? null;
@@ -1300,6 +1305,12 @@ export default function Home() {
               connectionLabel={spotlightTile.connectionLabel}
               isSpeaking={spotlightTile.isSpeaking}
               audioOutputId={spotlightTile.audioOutputId}
+              volume={spotlightTile.volume}
+              onVolumeChange={
+                spotlightTile.canControlVolume
+                  ? (volume) => setPeerVolumes((items) => ({ ...items, [spotlightTile.id]: volume }))
+                  : undefined
+              }
               isSpotlight
               isSelected
             />
@@ -1318,6 +1329,12 @@ export default function Home() {
                 connectionLabel={tile.connectionLabel}
                 isSpeaking={tile.isSpeaking}
                 audioOutputId={tile.audioOutputId}
+                volume={tile.volume}
+                onVolumeChange={
+                  tile.canControlVolume
+                    ? (volume) => setPeerVolumes((items) => ({ ...items, [tile.id]: volume }))
+                    : undefined
+                }
                 isSelected={spotlightId === tile.id && tile.active}
                 onSelect={tile.active ? () => setSpotlightId((current) => (current === tile.id ? "" : tile.id)) : undefined}
               />
@@ -1517,8 +1534,10 @@ function VideoTile({
   connectionLabel,
   isSpeaking = false,
   audioOutputId = "",
+  volume = 1,
   isSpotlight = false,
   isSelected = false,
+  onVolumeChange,
   onSelect,
 }: {
   stream: MediaStream | null;
@@ -1530,8 +1549,10 @@ function VideoTile({
   connectionLabel: string;
   isSpeaking?: boolean;
   audioOutputId?: string;
+  volume?: number;
   isSpotlight?: boolean;
   isSelected?: boolean;
+  onVolumeChange?: (volume: number) => void;
   onSelect?: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -1558,6 +1579,12 @@ function VideoTile({
       audio.setSinkId(audioOutputId).catch(() => undefined);
     }
   }, [audioOutputId]);
+
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.volume = Math.max(0, Math.min(1, volume));
+    }
+  }, [volume]);
 
   function openFullscreen(event: MouseEvent<HTMLButtonElement>) {
     event.stopPropagation();
@@ -1589,6 +1616,25 @@ function VideoTile({
         <span className={cameraOn ? "badge-online" : "badge-muted"}>{cameraOn ? "Cam" : "Sem cam"}</span>
       </div>
       <span className="tile-name">{label}</span>
+      {onVolumeChange ? (
+        <label
+          className="volume-control"
+          onClick={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <span>Vol</span>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            value={volume}
+            onChange={(event) => onVolumeChange(Number(event.target.value))}
+            aria-label={`Volume de ${label}`}
+          />
+          <b>{Math.round(volume * 100)}</b>
+        </label>
+      ) : null}
       {active ? (
         <button
           type="button"

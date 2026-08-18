@@ -59,6 +59,7 @@ const jsonHeaders = {
   "content-type": "application/json; charset=utf-8",
   "cache-control": "no-store",
 };
+const PRESENCE_TTL_MS = 6500;
 
 const emptyStore = (): LocalStore => ({
   nextMessageId: 1,
@@ -228,7 +229,7 @@ async function handleLocalPresence(request: Request) {
 
   if (request.method === "GET") {
     const roomId = cleanText(url.searchParams.get("roomId"), "sala-amigos", 120);
-    store.presences = store.presences.filter((presence) => now - presence.last_seen < 12000);
+    store.presences = store.presences.filter((presence) => now - presence.last_seen < PRESENCE_TTL_MS);
     await writeLocalStore(store);
 
     return json({
@@ -257,7 +258,7 @@ async function handleLocalPresence(request: Request) {
     store.presences = [
       ...store.presences.filter((presence) => !(presence.room_id === roomId && presence.client_id === clientId)),
       nextPresence,
-    ].filter((presence) => now - presence.last_seen < 12000);
+    ].filter((presence) => now - presence.last_seen < PRESENCE_TTL_MS);
     await writeLocalStore(store);
 
     return json({ ok: true, participant: toPresence(nextPresence) }, 201);
@@ -477,7 +478,7 @@ async function handlePresence(request: Request, env?: Env) {
 
   if (request.method === "GET") {
     const roomId = cleanText(url.searchParams.get("roomId"), "sala-amigos", 120);
-    await env.DB.prepare(`DELETE FROM voice_presence WHERE last_seen < ?`).bind(now - 12000).run();
+    await env.DB.prepare(`DELETE FROM voice_presence WHERE last_seen < ?`).bind(now - PRESENCE_TTL_MS).run();
     const result = await env.DB.prepare(
       `SELECT room_id, client_id, name, mic_on, camera_on, screen_on, last_seen
        FROM voice_presence
