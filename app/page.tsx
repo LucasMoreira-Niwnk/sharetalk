@@ -147,6 +147,7 @@ export default function Home() {
   const knownSignalsRef = useRef<Set<number>>(new Set());
   const autoJoinAttemptedRef = useRef(false);
   const lastSignalIdRef = useRef(0);
+  const connectionRequestsRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
     const current = new URL(window.location.href);
@@ -374,6 +375,7 @@ export default function Home() {
         if (["failed", "closed", "disconnected"].includes(peer.connectionState)) {
           peersRef.current.delete(peerId);
           peerConnectionIdsRef.current.delete(peerId);
+          connectionRequestsRef.current.delete(peerId);
           setRemotePeers((items) => items.filter((item) => item.id !== peerId));
         }
       };
@@ -390,6 +392,7 @@ export default function Home() {
           if (candidate === peer) {
             peersRef.current.delete(id);
             peerConnectionIdsRef.current.delete(id);
+            connectionRequestsRef.current.delete(id);
           }
         });
         return;
@@ -403,6 +406,7 @@ export default function Home() {
               if (candidate === peer) {
                 peersRef.current.delete(id);
                 peerConnectionIdsRef.current.delete(id);
+                connectionRequestsRef.current.delete(id);
               }
             });
           }
@@ -420,6 +424,7 @@ export default function Home() {
             if (candidate === peer) {
               peersRef.current.delete(id);
               peerConnectionIdsRef.current.delete(id);
+              connectionRequestsRef.current.delete(id);
             }
           });
         }
@@ -654,6 +659,7 @@ export default function Home() {
           peersRef.current.get(signal.senderId)?.close();
           peersRef.current.delete(signal.senderId);
           peerConnectionIdsRef.current.delete(signal.senderId);
+          connectionRequestsRef.current.delete(signal.senderId);
           setRemotePeers((items) => items.filter((item) => item.id !== signal.senderId));
         }
         return;
@@ -680,7 +686,7 @@ export default function Home() {
       );
 
       if (signal.kind === "join") {
-        if (localStreamRef.current && clientId > signal.senderId) {
+        if (localStreamRef.current) {
           if (peer.signalingState !== "stable") {
             return;
           }
@@ -845,6 +851,37 @@ export default function Home() {
                 : peer;
             }),
         );
+
+        if (localStreamRef.current) {
+          const now = Date.now();
+          for (const participant of result.participants) {
+            if (participant.clientId === clientId) {
+              continue;
+            }
+
+            const peer = peersRef.current.get(participant.clientId);
+            const needsConnection =
+              !peer ||
+              peer.connectionState === "closed" ||
+              peer.connectionState === "failed" ||
+              peer.connectionState === "disconnected";
+            const lastRequest = connectionRequestsRef.current.get(participant.clientId) ?? 0;
+
+            if (needsConnection && now - lastRequest > 5000) {
+              connectionRequestsRef.current.set(participant.clientId, now);
+              postSignal(
+                "join",
+                {
+                  name: name || "Amigo",
+                  micOn,
+                  cameraOn,
+                  screenOn: Boolean(screenStreamRef.current),
+                },
+                participant.clientId,
+              ).catch(() => undefined);
+            }
+          }
+        }
       } catch {
         if (!cancelled) {
           setError("Nao consegui atualizar a lista do canal agora.");
@@ -858,7 +895,7 @@ export default function Home() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [clientId, isReady, voiceRoomKey]);
+  }, [cameraOn, clientId, isReady, micOn, name, postSignal, voiceRoomKey]);
 
   useEffect(() => {
     if (!localStream || !clientId) {
@@ -959,6 +996,7 @@ export default function Home() {
     peersRef.current.forEach((peer) => peer.close());
     peersRef.current.clear();
     peerConnectionIdsRef.current.clear();
+    connectionRequestsRef.current.clear();
     setLocalStream(null);
     setScreenStream(null);
     setRemotePeers([]);
@@ -1038,6 +1076,7 @@ export default function Home() {
     peersRef.current.forEach((peer) => peer.close());
     peersRef.current.clear();
     peerConnectionIdsRef.current.clear();
+    connectionRequestsRef.current.clear();
     setRemotePeers([]);
     setPresenceParticipants([]);
     lastSignalIdRef.current = 0;
