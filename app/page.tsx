@@ -24,10 +24,21 @@ type SignalMessage = {
 type RemotePeer = {
   id: string;
   name: string;
+  connectionId: string;
   stream: MediaStream | null;
   micOn: boolean;
   cameraOn: boolean;
   screenOn: boolean;
+};
+
+type PresenceParticipant = {
+  roomId: string;
+  clientId: string;
+  name: string;
+  micOn: boolean;
+  cameraOn: boolean;
+  screenOn: boolean;
+  lastSeen: number;
 };
 
 type DeviceSelections = {
@@ -49,6 +60,8 @@ const VOICE_CHANNELS = [
   { id: "estudo", name: "Estudo" },
 ];
 const SERVER_STORAGE_KEY = "papo-servidores";
+const CLIENT_STORAGE_KEY = "papo-client-id";
+const ACTIVE_VOICE_STORAGE_KEY = "papo-voz-ativa";
 
 function makeId(prefix: string) {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -64,6 +77,18 @@ function cleanServerId(value: string) {
 
 function asBoolean(value: unknown, fallback = false) {
   return typeof value === "boolean" ? value : fallback;
+}
+
+function readActiveVoice() {
+  try {
+    return JSON.parse(window.sessionStorage.getItem(ACTIVE_VOICE_STORAGE_KEY) ?? "null") as {
+      serverId?: string;
+      channelId?: string;
+    } | null;
+  } catch {
+    window.sessionStorage.removeItem(ACTIVE_VOICE_STORAGE_KEY);
+    return null;
+  }
 }
 
 function getServerFromUrl(current: URL) {
@@ -100,11 +125,13 @@ export default function Home() {
   const [selectedTextChannel, setSelectedTextChannel] = useState(TEXT_CHANNELS[0].id);
   const [selectedVoiceChannel, setSelectedVoiceChannel] = useState(VOICE_CHANNELS[0].id);
   const [clientId, setClientId] = useState("");
+  const [connectionId, setConnectionId] = useState("");
   const [name, setName] = useState("");
   const [draftName, setDraftName] = useState("");
   const [draftMessage, setDraftMessage] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [remotePeers, setRemotePeers] = useState<RemotePeer[]>([]);
+  const [presenceParticipants, setPresenceParticipants] = useState<PresenceParticipant[]>([]);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const [cameraOn, setCameraOn] = useState(false);
@@ -126,10 +153,13 @@ export default function Home() {
   const [lastSignalId, setLastSignalId] = useState(0);
 
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const peerConnectionIdsRef = useRef<Map<string, string>>(new Map());
   const localStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const knownSignalsRef = useRef<Set<number>>(new Set());
+  const autoJoinAttemptedRef = useRef(false);
+  const lastSignalIdRef = useRef(0);
 
   useEffect(() => {
     const current = new URL(window.location.href);
@@ -142,11 +172,18 @@ export default function Home() {
 
     const storedName = window.localStorage.getItem("papo-nome") ?? "";
     const storedServers = JSON.parse(window.localStorage.getItem(SERVER_STORAGE_KEY) ?? "[]") as string[];
+    const storedClientId = window.sessionStorage.getItem(CLIENT_STORAGE_KEY) || makeId("pessoa");
+    const storedVoice = readActiveVoice();
     const nextServers = Array.from(new Set([nextServer, DEFAULT_SERVER, ...storedServers.map(cleanServerId)]));
     window.localStorage.setItem(SERVER_STORAGE_KEY, JSON.stringify(nextServers));
-    setClientId(makeId("pessoa"));
+    window.sessionStorage.setItem(CLIENT_STORAGE_KEY, storedClientId);
+    setClientId(storedClientId);
+    setConnectionId(makeId("conexao"));
     setServerId(nextServer);
     setServerDraft(nextServer);
+    if (storedVoice?.serverId === nextServer && storedVoice.channelId && VOICE_CHANNELS.some((channel) => channel.id === storedVoice.channelId)) {
+      setSelectedVoiceChannel(storedVoice.channelId);
+    }
     setServers(nextServers);
     setName(storedName);
     setDraftName(storedName);
@@ -224,7 +261,7 @@ export default function Home() {
 
   const postSignal = useCallback(
     async (kind: SignalMessage["kind"], payload: Record<string, unknown>, recipientId?: string) => {
-      if (!clientId) {
+      if (!clientId || !connectionId) {
         return;
       }
 
@@ -235,38 +272,97 @@ export default function Home() {
           senderId: clientId,
           recipientId: recipientId ?? null,
           kind,
-          payload,
+          payload: { ...payload, connectionId },
         }),
       });
     },
-    [clientId, voiceRoomKey],
+    [clientId, connectionId, voiceRoomKey],
   );
 
-  useEffect(() => {
-    if (isReady && localStream && clientId) {
-      postSignal("join", {
-        name: name || "Amigo",
-        micOn: localStream.getAudioTracks().some((track) => track.enabled),
-        cameraOn: localStream.getVideoTracks().some((track) => track.enabled),
-        screenOn: Boolean(screenStreamRef.current),
-      }).catch(() => undefined);
+  const postPresence = useCallback(async (overrideName?: string) => {
+    if (!clientId || !localStreamRef.current) {
+      return;
     }
-  }, [clientId, isReady, localStream, name, postSignal, selectedVoiceChannel]);
+
+    const stream = localStreamRef.current;
+    await api<{ ok: boolean }>("/api/presence", {
+      method: "POST",
+      body: JSON.stringify({
+        roomId: voiceRoomKey,
+        clientId,
+        name: overrideName || name || "Amigo",
+        micOn: stream.getAudioTracks().some((track) => track.enabled),
+        cameraOn: stream.getVideoTracks().some((track) => track.enabled),
+        screenOn: Boolean(screenStreamRef.current),
+      }),
+    });
+  }, [clientId, name, voiceRoomKey]);
+
+  const leavePresence = useCallback(async () => {
+    if (!clientId) {
+      return;
+    }
+
+    await api<{ ok: boolean }>("/api/presence", {
+      method: "DELETE",
+      body: JSON.stringify({
+        roomId: voiceRoomKey,
+        clientId,
+      }),
+    });
+  }, [clientId, voiceRoomKey]);
+
+  const syncSignalCursor = useCallback(async () => {
+    const result = await api<{ signals: SignalMessage[]; lastId: number }>(
+      `/api/signals?roomId=${encodeURIComponent(voiceRoomKey)}&latest=1`,
+    );
+    lastSignalIdRef.current = result.lastId;
+    setLastSignalId(result.lastId);
+    knownSignalsRef.current.clear();
+  }, [voiceRoomKey]);
+
+  const renegotiatePeer = useCallback(
+    async (peerId: string, peer: RTCPeerConnection) => {
+      if (!localStreamRef.current || peer.signalingState !== "stable" || peer.connectionState === "closed") {
+        return;
+      }
+
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      await postSignal("offer", {
+        description: offer,
+        name: name || "Amigo",
+        micOn,
+        cameraOn,
+        screenOn: Boolean(screenStreamRef.current),
+      }, peerId);
+    },
+    [cameraOn, micOn, name, postSignal],
+  );
 
   const createPeer = useCallback(
-    (peerId: string, peerName: string) => {
+    (peerId: string, peerName: string, peerConnectionId = "") => {
       const current = peersRef.current.get(peerId);
       if (current) {
-        return current;
+        const existingConnectionId = peerConnectionIdsRef.current.get(peerId);
+        if (!peerConnectionId || existingConnectionId === peerConnectionId) {
+          return current;
+        }
+
+        current.close();
+        peersRef.current.delete(peerId);
+        peerConnectionIdsRef.current.delete(peerId);
+        setRemotePeers((items) => items.filter((item) => item.id !== peerId));
       }
 
       const peer = new RTCPeerConnection({ iceServers: ICE_SERVERS });
       peersRef.current.set(peerId, peer);
+      peerConnectionIdsRef.current.set(peerId, peerConnectionId);
       setRemotePeers((items) => {
         if (items.some((item) => item.id === peerId)) {
           return items;
         }
-        return [...items, { id: peerId, name: peerName, stream: null, micOn: false, cameraOn: false, screenOn: false }];
+        return [...items, { id: peerId, name: peerName, connectionId: peerConnectionId, stream: null, micOn: false, cameraOn: false, screenOn: false }];
       });
 
       localStreamRef.current?.getTracks().forEach((track) => {
@@ -289,7 +385,7 @@ export default function Home() {
               }
             });
 
-            return { ...item, stream: nextStream, name: peerName };
+            return { ...item, stream: nextStream, name: peerName, connectionId: peerConnectionId || item.connectionId };
           }),
         );
       };
@@ -305,30 +401,14 @@ export default function Home() {
       peer.onconnectionstatechange = () => {
         if (["failed", "closed", "disconnected"].includes(peer.connectionState)) {
           peersRef.current.delete(peerId);
+          peerConnectionIdsRef.current.delete(peerId);
           setRemotePeers((items) => items.filter((item) => item.id !== peerId));
         }
       };
 
-      peer.onnegotiationneeded = () => {
-        if (!localStreamRef.current || peer.signalingState !== "stable") {
-          return;
-        }
-
-        peer
-          .createOffer()
-          .then(async (offer) => {
-            if (peer.signalingState !== "stable") {
-              return;
-            }
-            await peer.setLocalDescription(offer);
-            await postSignal("offer", { description: offer, name: name || "Amigo" }, peerId);
-          })
-          .catch(() => undefined);
-      };
-
       return peer;
     },
-    [name, postSignal],
+    [postSignal],
   );
 
   const replaceVideoTrack = useCallback((track: MediaStreamTrack | null) => {
@@ -337,6 +417,7 @@ export default function Home() {
         peersRef.current.forEach((candidate, id) => {
           if (candidate === peer) {
             peersRef.current.delete(id);
+            peerConnectionIdsRef.current.delete(id);
           }
         });
         return;
@@ -349,6 +430,7 @@ export default function Home() {
             peersRef.current.forEach((candidate, id) => {
               if (candidate === peer) {
                 peersRef.current.delete(id);
+                peerConnectionIdsRef.current.delete(id);
               }
             });
           }
@@ -356,16 +438,22 @@ export default function Home() {
       } else if (track && localStreamRef.current) {
         try {
           peer.addTrack(track, localStreamRef.current);
+          peersRef.current.forEach((candidate, id) => {
+            if (candidate === peer) {
+              renegotiatePeer(id, peer).catch(() => undefined);
+            }
+          });
         } catch {
           peersRef.current.forEach((candidate, id) => {
             if (candidate === peer) {
               peersRef.current.delete(id);
+              peerConnectionIdsRef.current.delete(id);
             }
           });
         }
       }
     });
-  }, []);
+  }, [renegotiatePeer]);
 
   const replaceAudioTrack = useCallback((track: MediaStreamTrack | null) => {
     peersRef.current.forEach((peer) => {
@@ -379,12 +467,17 @@ export default function Home() {
       } else if (track && localStreamRef.current) {
         try {
           peer.addTrack(track, localStreamRef.current);
+          peersRef.current.forEach((candidate, id) => {
+            if (candidate === peer) {
+              renegotiatePeer(id, peer).catch(() => undefined);
+            }
+          });
         } catch {
           // Closed peer; it will be removed by the connection state handler.
         }
       }
     });
-  }, []);
+  }, [renegotiatePeer]);
 
   const refreshDevices = useCallback(async () => {
     if (!window.isSecureContext) {
@@ -426,6 +519,7 @@ export default function Home() {
       const stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints());
       const previousStream = localStreamRef.current;
       previousStream?.getTracks().forEach((track) => track.stop());
+      localStreamRef.current = stream;
       setLocalStream(stream);
       setCameraOn(Boolean(stream.getVideoTracks()[0]?.enabled));
       setMicOn(Boolean(stream.getAudioTracks()[0]?.enabled));
@@ -501,6 +595,7 @@ export default function Home() {
         });
         setStatus("Conectado apenas com microfone.");
       }
+      localStreamRef.current = stream;
       setLocalStream(stream);
       setCameraOn(Boolean(stream.getVideoTracks()[0]?.enabled));
       setMicOn(Boolean(stream.getAudioTracks()[0]?.enabled));
@@ -510,18 +605,12 @@ export default function Home() {
       await refreshDevices();
       setMediaAccessStatus("granted");
       setMediaAccessMessage("Permissao concedida. Dispositivos carregados.");
-      await postSignal("join", {
-        name: name || "Amigo",
-        micOn: stream.getAudioTracks().some((track) => track.enabled),
-        cameraOn: stream.getVideoTracks().some((track) => track.enabled),
-        screenOn: Boolean(screenStreamRef.current),
-      });
       return stream;
     } catch {
       setError("Permita camera ou microfone no navegador para entrar na chamada.");
       return null;
     }
-  }, [deviceSelections.audioInputId, getMediaConstraints, name, postSignal, refreshDevices, requestDeviceAccess]);
+  }, [deviceSelections.audioInputId, getMediaConstraints, refreshDevices, requestDeviceAccess]);
 
   const joinCall = useCallback(async () => {
     const stream = localStreamRef.current ?? (await ensureMedia());
@@ -529,12 +618,18 @@ export default function Home() {
       return;
     }
 
-    peersRef.current.forEach((peer) => {
+    await syncSignalCursor();
+    peersRef.current.forEach((peer, peerId) => {
+      let addedTrack = false;
       stream.getTracks().forEach((track) => {
         if (!peer.getSenders().some((sender) => sender.track === track)) {
           peer.addTrack(track, stream);
+          addedTrack = true;
         }
       });
+      if (addedTrack) {
+        renegotiatePeer(peerId, peer).catch(() => undefined);
+      }
     });
     await postSignal("join", {
       name: name || "Amigo",
@@ -542,8 +637,25 @@ export default function Home() {
       cameraOn: stream.getVideoTracks().some((track) => track.enabled),
       screenOn: Boolean(screenStreamRef.current),
     });
+    window.sessionStorage.setItem(ACTIVE_VOICE_STORAGE_KEY, JSON.stringify({ serverId, channelId: selectedVoiceChannel }));
+    await postPresence();
     setStatus(`Conectado ao canal de voz ${currentVoiceChannel.name}.`);
-  }, [currentVoiceChannel.name, ensureMedia, name, postSignal]);
+  }, [currentVoiceChannel.name, ensureMedia, name, postPresence, postSignal, renegotiatePeer, selectedVoiceChannel, serverId, syncSignalCursor]);
+
+  useEffect(() => {
+    if (!isReady || !clientId || localStream || autoJoinAttemptedRef.current) {
+      return;
+    }
+
+    const storedVoice = readActiveVoice();
+
+    if (storedVoice?.serverId !== serverId || storedVoice.channelId !== selectedVoiceChannel) {
+      return;
+    }
+
+    autoJoinAttemptedRef.current = true;
+    joinCall().catch(() => undefined);
+  }, [clientId, isReady, joinCall, localStream, selectedVoiceChannel, serverId]);
 
   const handleSignal = useCallback(
     async (signal: SignalMessage) => {
@@ -556,6 +668,7 @@ export default function Home() {
 
       knownSignalsRef.current.add(signal.id);
       const peerName = typeof signal.payload.name === "string" ? signal.payload.name : "Amigo";
+      const signalConnectionId = typeof signal.payload.connectionId === "string" ? signal.payload.connectionId : "";
       const mediaState = {
         name: peerName,
         micOn: asBoolean(signal.payload.micOn, true),
@@ -564,23 +677,41 @@ export default function Home() {
       };
 
       if (signal.kind === "leave") {
-        peersRef.current.get(signal.senderId)?.close();
-        peersRef.current.delete(signal.senderId);
-        setRemotePeers((items) => items.filter((item) => item.id !== signal.senderId));
+        const existingConnectionId = peerConnectionIdsRef.current.get(signal.senderId);
+        if (!signalConnectionId || !existingConnectionId || existingConnectionId === signalConnectionId) {
+          peersRef.current.get(signal.senderId)?.close();
+          peersRef.current.delete(signal.senderId);
+          peerConnectionIdsRef.current.delete(signal.senderId);
+          setRemotePeers((items) => items.filter((item) => item.id !== signal.senderId));
+        }
         return;
       }
-
-      const peer = createPeer(signal.senderId, peerName);
-      setRemotePeers((items) =>
-        items.map((item) => (item.id === signal.senderId ? { ...item, ...mediaState } : item)),
-      );
 
       if (signal.kind === "state") {
+        setRemotePeers((items) =>
+          items.map((item) =>
+            item.id === signal.senderId
+              ? { ...item, ...mediaState, connectionId: signalConnectionId || item.connectionId }
+              : item,
+          ),
+        );
         return;
       }
+
+      const peer = createPeer(signal.senderId, peerName, signalConnectionId);
+      setRemotePeers((items) =>
+        items.map((item) =>
+          item.id === signal.senderId
+            ? { ...item, ...mediaState, connectionId: signalConnectionId || item.connectionId }
+            : item,
+        ),
+      );
 
       if (signal.kind === "join") {
         if (localStreamRef.current && clientId > signal.senderId) {
+          if (peer.signalingState !== "stable") {
+            return;
+          }
           const offer = await peer.createOffer();
           await peer.setLocalDescription(offer);
           await postSignal(
@@ -599,6 +730,9 @@ export default function Home() {
       }
 
       if (signal.kind === "offer") {
+        if (peer.signalingState === "closed") {
+          return;
+        }
         await peer.setRemoteDescription(signal.payload.description as RTCSessionDescriptionInit);
         if (!localStreamRef.current) {
           setStatus("Um amigo entrou. Ative camera ou microfone para aparecer.");
@@ -620,12 +754,19 @@ export default function Home() {
       }
 
       if (signal.kind === "answer") {
+        if (peer.signalingState !== "have-local-offer") {
+          return;
+        }
         await peer.setRemoteDescription(signal.payload.description as RTCSessionDescriptionInit);
         return;
       }
 
       if (signal.kind === "ice" && signal.payload.candidate) {
-        await peer.addIceCandidate(signal.payload.candidate as RTCIceCandidateInit);
+        try {
+          await peer.addIceCandidate(signal.payload.candidate as RTCIceCandidateInit);
+        } catch {
+          // The candidate can arrive after a refresh replaced the peer.
+        }
       }
     },
     [cameraOn, clientId, createPeer, micOn, name, postSignal],
@@ -660,7 +801,7 @@ export default function Home() {
   }, [isReady, textRoomKey]);
 
   useEffect(() => {
-    if (!isReady || !clientId) {
+    if (!isReady || !clientId || !localStream) {
       return undefined;
     }
 
@@ -669,14 +810,19 @@ export default function Home() {
     async function pollSignals() {
       try {
         const result = await api<{ signals: SignalMessage[]; lastId: number }>(
-          `/api/signals?roomId=${encodeURIComponent(voiceRoomKey)}&after=${lastSignalId}`,
+          `/api/signals?roomId=${encodeURIComponent(voiceRoomKey)}&after=${lastSignalIdRef.current}`,
         );
         if (cancelled) {
           return;
         }
         for (const signal of result.signals) {
-          await handleSignal(signal);
+          try {
+            await handleSignal(signal);
+          } catch {
+            // Ignore stale negotiation messages so fresh signals can keep flowing.
+          }
         }
+        lastSignalIdRef.current = result.lastId;
         setLastSignalId(result.lastId);
       } catch {
         if (!cancelled) {
@@ -691,13 +837,78 @@ export default function Home() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [clientId, handleSignal, isReady, lastSignalId, voiceRoomKey]);
+  }, [clientId, handleSignal, isReady, localStream, voiceRoomKey]);
+
+  useEffect(() => {
+    if (!isReady || !clientId) {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    async function loadPresence() {
+      try {
+        const result = await api<{ participants: PresenceParticipant[] }>(
+          `/api/presence?roomId=${encodeURIComponent(voiceRoomKey)}`,
+        );
+        if (cancelled) {
+          return;
+        }
+
+        setPresenceParticipants(result.participants);
+        const onlineIds = new Set(result.participants.map((participant) => participant.clientId));
+        setRemotePeers((items) =>
+          items
+            .filter((peer) => onlineIds.has(peer.id))
+            .map((peer) => {
+              const presence = result.participants.find((participant) => participant.clientId === peer.id);
+              return presence
+                ? {
+                    ...peer,
+                    name: presence.name,
+                    micOn: presence.micOn,
+                    cameraOn: presence.cameraOn,
+                    screenOn: presence.screenOn,
+                  }
+                : peer;
+            }),
+        );
+      } catch {
+        if (!cancelled) {
+          setError("Nao consegui atualizar a lista do canal agora.");
+        }
+      }
+    }
+
+    loadPresence();
+    const interval = window.setInterval(loadPresence, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [clientId, isReady, voiceRoomKey]);
+
+  useEffect(() => {
+    if (!localStream || !clientId) {
+      return undefined;
+    }
+
+    postPresence().catch(() => undefined);
+    const interval = window.setInterval(() => {
+      postPresence().catch(() => undefined);
+    }, 3000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [clientId, localStream, micOn, cameraOn, screenStream, postPresence]);
 
   useEffect(() => {
     return () => {
       localStreamRef.current?.getTracks().forEach((track) => track.stop());
       screenStreamRef.current?.getTracks().forEach((track) => track.stop());
       peersRef.current.forEach((peer) => peer.close());
+      peerConnectionIdsRef.current.clear();
     };
   }, []);
 
@@ -706,7 +917,13 @@ export default function Home() {
     const cleanName = draftName.trim() || "Amigo";
     window.localStorage.setItem("papo-nome", cleanName);
     setName(cleanName);
-    await postSignal("join", { name: cleanName });
+    await postSignal("state", {
+      name: cleanName,
+      micOn,
+      cameraOn,
+      screenOn: Boolean(screenStreamRef.current),
+    });
+    await postPresence(cleanName);
   }
 
   async function sendMessage(event: FormEvent) {
@@ -742,6 +959,7 @@ export default function Home() {
       cameraOn,
       screenOn: Boolean(screenStreamRef.current),
     }).catch(() => undefined);
+    postPresence().catch(() => undefined);
   }
 
   function toggleCamera() {
@@ -757,14 +975,18 @@ export default function Home() {
       cameraOn: videoTrack.enabled,
       screenOn: Boolean(screenStreamRef.current),
     }).catch(() => undefined);
+    postPresence().catch(() => undefined);
   }
 
   function disconnectCall() {
     postSignal("leave", { name: name || "Amigo" }).catch(() => undefined);
+    leavePresence().catch(() => undefined);
+    window.sessionStorage.removeItem(ACTIVE_VOICE_STORAGE_KEY);
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     screenStream?.getTracks().forEach((track) => track.stop());
     peersRef.current.forEach((peer) => peer.close());
     peersRef.current.clear();
+    peerConnectionIdsRef.current.clear();
     setLocalStream(null);
     setScreenStream(null);
     setRemotePeers([]);
@@ -780,6 +1002,7 @@ export default function Home() {
       const cameraTrack = localStream?.getVideoTracks()[0] ?? null;
       replaceVideoTrack(cameraTrack);
       screenStream.getTracks().forEach((track) => track.stop());
+      screenStreamRef.current = null;
       setScreenStream(null);
       postSignal("state", {
         name: name || "Amigo",
@@ -787,6 +1010,7 @@ export default function Home() {
         cameraOn: Boolean(cameraTrack && cameraTrack.enabled),
         screenOn: false,
       }).catch(() => undefined);
+      postPresence().catch(() => undefined);
       setStatus("Compartilhamento encerrado.");
       return;
     }
@@ -801,6 +1025,7 @@ export default function Home() {
         } catch {
           setError("A conexao de video ja tinha sido encerrada.");
         }
+        screenStreamRef.current = null;
         setScreenStream(null);
         postSignal("state", {
           name: name || "Amigo",
@@ -808,7 +1033,9 @@ export default function Home() {
           cameraOn: Boolean(localStreamRef.current?.getVideoTracks()[0]?.enabled),
           screenOn: false,
         }).catch(() => undefined);
+        postPresence().catch(() => undefined);
       };
+      screenStreamRef.current = stream;
       setScreenStream(stream);
       postSignal("state", {
         name: name || "Amigo",
@@ -816,6 +1043,7 @@ export default function Home() {
         cameraOn: true,
         screenOn: true,
       }).catch(() => undefined);
+      postPresence().catch(() => undefined);
       setStatus("Tela compartilhada.");
     } catch {
       setError("Nao consegui iniciar o compartilhamento de tela.");
@@ -833,10 +1061,15 @@ export default function Home() {
   }
 
   function openServer(cleanServer: string) {
+    leavePresence().catch(() => undefined);
+    window.sessionStorage.removeItem(ACTIVE_VOICE_STORAGE_KEY);
     window.history.pushState(null, "", serverPath(cleanServer));
     peersRef.current.forEach((peer) => peer.close());
     peersRef.current.clear();
+    peerConnectionIdsRef.current.clear();
     setRemotePeers([]);
+    setPresenceParticipants([]);
+    lastSignalIdRef.current = 0;
     setLastSignalId(0);
     knownSignalsRef.current.clear();
     setSpotlightId("");
@@ -863,13 +1096,20 @@ export default function Home() {
     }
 
     postSignal("leave", { name: name || "Amigo" }).catch(() => undefined);
+    leavePresence().catch(() => undefined);
     peersRef.current.forEach((peer) => peer.close());
     peersRef.current.clear();
+    peerConnectionIdsRef.current.clear();
     setRemotePeers([]);
+    setPresenceParticipants([]);
+    lastSignalIdRef.current = 0;
     setLastSignalId(0);
     knownSignalsRef.current.clear();
     setSpotlightId("");
     setSelectedVoiceChannel(channelId);
+    if (localStreamRef.current) {
+      window.sessionStorage.setItem(ACTIVE_VOICE_STORAGE_KEY, JSON.stringify({ serverId, channelId }));
+    }
     setStatus(`Canal de voz ${VOICE_CHANNELS.find((channel) => channel.id === channelId)?.name ?? channelId} selecionado.`);
   }
 
@@ -911,10 +1151,16 @@ export default function Home() {
     })),
   ];
   const spotlightTile = videoTiles.find((tile) => tile.id === spotlightId && tile.active) ?? null;
-  const voiceParticipants = [
-    ...(isConnected ? [{ id: clientId || "local", name: visibleName, isLocal: true }] : []),
-    ...remotePeers.map((peer) => ({ id: peer.id, name: peer.name, isLocal: false })),
-  ];
+  const voiceParticipants = presenceParticipants.length > 0
+    ? presenceParticipants.map((participant) => ({
+        id: participant.clientId,
+        name: participant.clientId === clientId ? visibleName : participant.name,
+        isLocal: participant.clientId === clientId,
+      }))
+    : [
+        ...(isConnected ? [{ id: clientId || "local", name: visibleName, isLocal: true }] : []),
+        ...remotePeers.map((peer) => ({ id: peer.id, name: peer.name, isLocal: false })),
+      ];
 
   return (
     <main className="app-shell">
@@ -1340,3 +1586,4 @@ function VideoTile({
     </div>
   );
 }
+

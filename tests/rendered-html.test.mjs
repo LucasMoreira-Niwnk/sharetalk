@@ -91,3 +91,100 @@ test("uses local persistence when D1 is unavailable", async () => {
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+test("tracks local voice presence when D1 is unavailable", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "sharetalk-presence-"));
+  process.env.SHARETALK_DATA_FILE = join(dataDir, "store.json");
+
+  try {
+    const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+    workerUrl.searchParams.set("presence", `${process.pid}-${Date.now()}`);
+    const { default: worker } = await import(workerUrl.href);
+    const ctx = {
+      waitUntil() {},
+      passThroughOnException() {},
+    };
+
+    const heartbeat = await worker.fetch(
+      new Request("http://localhost/api/presence", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          roomId: "Servidor-thoseguys:voz:lounge",
+          clientId: "pessoa-teste",
+          name: "Lucas",
+          micOn: true,
+          cameraOn: false,
+          screenOn: false,
+        }),
+      }),
+      undefined,
+      ctx,
+    );
+
+    assert.equal(heartbeat.status, 201);
+
+    const loaded = await worker.fetch(
+      new Request("http://localhost/api/presence?roomId=Servidor-thoseguys%3Avoz%3Alounge"),
+      undefined,
+      ctx,
+    );
+    assert.equal(loaded.status, 200);
+
+    const payload = await loaded.json();
+    assert.equal(payload.participants.length, 1);
+    assert.equal(payload.participants[0].clientId, "pessoa-teste");
+    assert.equal(payload.participants[0].name, "Lucas");
+    assert.equal(payload.participants[0].micOn, true);
+  } finally {
+    delete process.env.SHARETALK_DATA_FILE;
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("can start signaling from the latest local cursor", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "sharetalk-signals-"));
+  process.env.SHARETALK_DATA_FILE = join(dataDir, "store.json");
+
+  try {
+    const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+    workerUrl.searchParams.set("signals", `${process.pid}-${Date.now()}`);
+    const { default: worker } = await import(workerUrl.href);
+    const ctx = {
+      waitUntil() {},
+      passThroughOnException() {},
+    };
+
+    for (const senderId of ["pessoa-a", "pessoa-b"]) {
+      const created = await worker.fetch(
+        new Request("http://localhost/api/signals", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            roomId: "Servidor-thoseguys:voz:lounge",
+            senderId,
+            kind: "join",
+            payload: { name: senderId },
+          }),
+        }),
+        undefined,
+        ctx,
+      );
+      assert.equal(created.status, 201);
+    }
+
+    const latest = await worker.fetch(
+      new Request("http://localhost/api/signals?roomId=Servidor-thoseguys%3Avoz%3Alounge&latest=1"),
+      undefined,
+      ctx,
+    );
+
+    assert.equal(latest.status, 200);
+    const payload = await latest.json();
+    assert.deepEqual(payload.signals, []);
+    assert.equal(payload.lastId, 2);
+  } finally {
+    delete process.env.SHARETALK_DATA_FILE;
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
