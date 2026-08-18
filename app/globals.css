@@ -604,6 +604,10 @@ h1 {
   background: #090b0e;
 }
 
+.video-tile.is-screen-share video {
+  object-fit: contain;
+}
+
 .video-tile audio {
   display: none;
 }

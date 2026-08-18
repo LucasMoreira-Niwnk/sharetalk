@@ -1065,6 +1065,21 @@ export default function Home() {
     setStatus("Desconectado da chamada.");
   }
 
+  function getDisplayMediaOptions(): DisplayMediaStreamOptions {
+    return {
+      video: true,
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
+      systemAudio: "include",
+      windowAudio: "system",
+      selfBrowserSurface: "include",
+      surfaceSwitching: "include",
+    } as DisplayMediaStreamOptions;
+  }
+
   async function shareScreen() {
     setError("");
     if (screenStream) {
@@ -1086,14 +1101,7 @@ export default function Home() {
     }
 
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: false,
-          autoGainControl: false,
-        },
-      });
+      const stream = await navigator.mediaDevices.getDisplayMedia(getDisplayMediaOptions());
       const [track] = stream.getVideoTracks();
       const sharingAudio = startScreenAudioShare(stream);
       replaceVideoTrack(track);
@@ -1184,6 +1192,7 @@ export default function Home() {
       audioOutputId: "",
       volume: 0,
       canControlVolume: false,
+      isScreenShare: Boolean(screenStream),
     },
     ...remotePeers.map((peer) => ({
       id: peer.id,
@@ -1198,6 +1207,7 @@ export default function Home() {
       audioOutputId: deviceSelections.audioOutputId,
       volume: peerVolumes[peer.id] ?? 1,
       canControlVolume: true,
+      isScreenShare: peer.screenOn,
     })),
   ];
   const spotlightTile = videoTiles.find((tile) => tile.id === spotlightId && tile.active) ?? null;
@@ -1306,6 +1316,7 @@ export default function Home() {
               isSpeaking={spotlightTile.isSpeaking}
               audioOutputId={spotlightTile.audioOutputId}
               volume={spotlightTile.volume}
+              isScreenShare={spotlightTile.isScreenShare}
               onVolumeChange={
                 spotlightTile.canControlVolume
                   ? (volume) => setPeerVolumes((items) => ({ ...items, [spotlightTile.id]: volume }))
@@ -1330,6 +1341,7 @@ export default function Home() {
                 isSpeaking={tile.isSpeaking}
                 audioOutputId={tile.audioOutputId}
                 volume={tile.volume}
+                isScreenShare={tile.isScreenShare}
                 onVolumeChange={
                   tile.canControlVolume
                     ? (volume) => setPeerVolumes((items) => ({ ...items, [tile.id]: volume }))
@@ -1535,6 +1547,7 @@ function VideoTile({
   isSpeaking = false,
   audioOutputId = "",
   volume = 1,
+  isScreenShare = false,
   isSpotlight = false,
   isSelected = false,
   onVolumeChange,
@@ -1550,6 +1563,7 @@ function VideoTile({
   isSpeaking?: boolean;
   audioOutputId?: string;
   volume?: number;
+  isScreenShare?: boolean;
   isSpotlight?: boolean;
   isSelected?: boolean;
   onVolumeChange?: (volume: number) => void;
@@ -1594,7 +1608,7 @@ function VideoTile({
   return (
     <div
       ref={tileRef}
-      className={`video-tile ${active ? "is-active" : ""} ${isSpeaking ? "is-speaking" : ""} ${isSpotlight ? "is-spotlight" : ""} ${isSelected ? "is-selected" : ""} ${onSelect ? "is-selectable" : ""}`}
+      className={`video-tile ${active ? "is-active" : ""} ${isScreenShare ? "is-screen-share" : ""} ${isSpeaking ? "is-speaking" : ""} ${isSpotlight ? "is-spotlight" : ""} ${isSelected ? "is-selected" : ""} ${onSelect ? "is-selectable" : ""}`}
       role={onSelect ? "button" : undefined}
       tabIndex={onSelect ? 0 : undefined}
       onClick={onSelect}
