@@ -143,6 +143,8 @@ export default function Home() {
   const peerConnectionIdsRef = useRef<Map<string, string>>(new Map());
   const localStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
+  const screenAudioContextRef = useRef<AudioContext | null>(null);
+  const screenAudioTrackRef = useRef<MediaStreamTrack | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const knownSignalsRef = useRef<Set<number>>(new Set());
   const autoJoinAttemptedRef = useRef(false);
@@ -456,6 +458,55 @@ export default function Home() {
     });
   }, [renegotiatePeer]);
 
+  const stopScreenAudioShare = useCallback((restoreMicrophone = true) => {
+    screenAudioTrackRef.current?.stop();
+    screenAudioTrackRef.current = null;
+    screenAudioContextRef.current?.close().catch(() => undefined);
+    screenAudioContextRef.current = null;
+
+    if (restoreMicrophone) {
+      replaceAudioTrack(localStreamRef.current?.getAudioTracks()[0] ?? null);
+    }
+  }, [replaceAudioTrack]);
+
+  const startScreenAudioShare = useCallback((displayStream: MediaStream) => {
+    stopScreenAudioShare(false);
+    const displayAudioTrack = displayStream.getAudioTracks()[0];
+
+    if (!displayAudioTrack) {
+      replaceAudioTrack(localStreamRef.current?.getAudioTracks()[0] ?? null);
+      return false;
+    }
+
+    const AudioContextCtor =
+      window.AudioContext ??
+      (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextCtor) {
+      replaceAudioTrack(localStreamRef.current?.getAudioTracks()[0] ?? null);
+      return false;
+    }
+
+    const audioContext = new AudioContextCtor();
+    const destination = audioContext.createMediaStreamDestination();
+    const localAudioTrack = localStreamRef.current?.getAudioTracks()[0] ?? null;
+
+    if (localAudioTrack) {
+      audioContext.createMediaStreamSource(new MediaStream([localAudioTrack])).connect(destination);
+    }
+    audioContext.createMediaStreamSource(new MediaStream([displayAudioTrack])).connect(destination);
+
+    const mixedTrack = destination.stream.getAudioTracks()[0];
+    screenAudioContextRef.current = audioContext;
+    screenAudioTrackRef.current = mixedTrack;
+    replaceAudioTrack(mixedTrack);
+
+    displayAudioTrack.onended = () => {
+      stopScreenAudioShare(true);
+    };
+
+    return true;
+  }, [replaceAudioTrack, stopScreenAudioShare]);
+
   const refreshDevices = useCallback(async () => {
     if (!window.isSecureContext) {
       setMediaAccessStatus("insecure");
@@ -500,8 +551,12 @@ export default function Home() {
       setLocalStream(stream);
       setCameraOn(Boolean(stream.getVideoTracks()[0]?.enabled));
       setMicOn(Boolean(stream.getAudioTracks()[0]?.enabled));
-      replaceAudioTrack(stream.getAudioTracks()[0] ?? null);
       replaceVideoTrack(screenStreamRef.current?.getVideoTracks()[0] ?? stream.getVideoTracks()[0] ?? null);
+      if (screenStreamRef.current) {
+        startScreenAudioShare(screenStreamRef.current);
+      } else {
+        replaceAudioTrack(stream.getAudioTracks()[0] ?? null);
+      }
       await refreshDevices();
       setStatus("Dispositivos atualizados.");
       return stream;
@@ -509,7 +564,7 @@ export default function Home() {
       setError("Nao consegui usar os dispositivos selecionados.");
       return null;
     }
-  }, [getMediaConstraints, refreshDevices, replaceAudioTrack, replaceVideoTrack]);
+  }, [getMediaConstraints, refreshDevices, replaceAudioTrack, replaceVideoTrack, startScreenAudioShare]);
 
   const requestDeviceAccess = useCallback(async () => {
     setError("");
@@ -916,6 +971,8 @@ export default function Home() {
     return () => {
       localStreamRef.current?.getTracks().forEach((track) => track.stop());
       screenStreamRef.current?.getTracks().forEach((track) => track.stop());
+      screenAudioTrackRef.current?.stop();
+      screenAudioContextRef.current?.close().catch(() => undefined);
       peersRef.current.forEach((peer) => peer.close());
       peerConnectionIdsRef.current.clear();
     };
@@ -992,6 +1049,7 @@ export default function Home() {
     leavePresence().catch(() => undefined);
     window.sessionStorage.removeItem(ACTIVE_VOICE_STORAGE_KEY);
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
+    stopScreenAudioShare(false);
     screenStream?.getTracks().forEach((track) => track.stop());
     peersRef.current.forEach((peer) => peer.close());
     peersRef.current.clear();
@@ -1011,6 +1069,7 @@ export default function Home() {
     if (screenStream) {
       const cameraTrack = localStream?.getVideoTracks()[0] ?? null;
       replaceVideoTrack(cameraTrack);
+      stopScreenAudioShare(true);
       screenStream.getTracks().forEach((track) => track.stop());
       screenStreamRef.current = null;
       setScreenStream(null);
@@ -1026,12 +1085,21 @@ export default function Home() {
     }
 
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+      });
       const [track] = stream.getVideoTracks();
+      const sharingAudio = startScreenAudioShare(stream);
       replaceVideoTrack(track);
       track.onended = () => {
         try {
           replaceVideoTrack(localStreamRef.current?.getVideoTracks()[0] ?? null);
+          stopScreenAudioShare(true);
         } catch {
           setError("A conexao de video ja tinha sido encerrada.");
         }
@@ -1054,7 +1122,7 @@ export default function Home() {
         screenOn: true,
       }).catch(() => undefined);
       postPresence().catch(() => undefined);
-      setStatus("Tela compartilhada.");
+      setStatus(sharingAudio ? "Tela compartilhada com audio." : "Tela compartilhada sem audio da aba/tela.");
     } catch {
       setError("Nao consegui iniciar o compartilhamento de tela.");
     }
