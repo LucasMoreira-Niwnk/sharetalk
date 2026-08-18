@@ -791,6 +791,14 @@ h1 {
   font-weight: 720;
 }
 
+.avatar-fallback .profile-avatar {
+  width: clamp(76px, 28%, 132px);
+  height: clamp(76px, 28%, 132px);
+  border: 3px solid rgba(255, 255, 255, 0.12);
+  font-size: clamp(2.2rem, 7vw, 4rem);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.24);
+}
+
 .tile-badges {
   position: absolute;
   top: 10px;
