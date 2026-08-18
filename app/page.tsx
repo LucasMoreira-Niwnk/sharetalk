@@ -189,7 +189,6 @@ export default function Home() {
   const [micOn, setMicOn] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [audioMuted, setAudioMuted] = useState(false);
-  const [remoteSpeaking, setRemoteSpeaking] = useState<Record<string, boolean>>({});
   const [peerVoiceVolumes, setPeerVoiceVolumes] = useState<Record<string, number>>({});
   const [peerLiveVolumes, setPeerLiveVolumes] = useState<Record<string, number>>({});
   const [devicesOpen, setDevicesOpen] = useState(false);
@@ -557,11 +556,6 @@ export default function Home() {
           peerConnectionIdsRef.current.delete(peerId);
           connectionRequestsRef.current.delete(peerId);
           setRemotePeers((items) => items.filter((item) => item.id !== peerId));
-          setRemoteSpeaking((items) => {
-            const next = { ...items };
-            delete next[peerId];
-            return next;
-          });
         }
       };
 
@@ -905,11 +899,6 @@ export default function Home() {
           peerConnectionIdsRef.current.delete(signal.senderId);
           connectionRequestsRef.current.delete(signal.senderId);
           setRemotePeers((items) => items.filter((item) => item.id !== signal.senderId));
-          setRemoteSpeaking((items) => {
-            const next = { ...items };
-            delete next[signal.senderId];
-            return next;
-          });
         }
         return;
       }
@@ -1328,7 +1317,6 @@ export default function Home() {
     setLocalStream(null);
     setScreenStream(null);
     setRemotePeers([]);
-    setRemoteSpeaking({});
     setSpotlightId("");
     setCameraOn(false);
     setMicOn(false);
@@ -1428,7 +1416,6 @@ export default function Home() {
     peerConnectionIdsRef.current.clear();
     connectionRequestsRef.current.clear();
     setRemotePeers([]);
-    setRemoteSpeaking({});
     setPresenceParticipants([]);
     lastSignalIdRef.current = 0;
     setLastSignalId(0);
@@ -1607,7 +1594,6 @@ export default function Home() {
       canControlVolume: false,
       canControlLiveVolume: false,
       isScreenShare: Boolean(screenStream),
-      onSpeakingChange: undefined,
     },
     ...remotePeers.map((peer) => ({
       id: peer.id,
@@ -1621,14 +1607,13 @@ export default function Home() {
       micOn: peer.micOn,
       cameraOn: peer.cameraOn || peer.screenOn,
       connectionLabel: peer.stream ? "Conectado" : "Conectando",
-      isSpeaking: Boolean(remoteSpeaking[peer.id] && peer.micOn),
+      isSpeaking: false,
       audioOutputId: deviceSelections.audioOutputId,
       volume: peerVoiceVolumes[peer.id] ?? 1,
       liveVolume: peerLiveVolumes[peer.id] ?? 1,
       canControlVolume: Boolean(peer.voiceStream),
       canControlLiveVolume: Boolean(peer.screenAudioStream),
       isScreenShare: peer.screenOn,
-      onSpeakingChange: (speaking: boolean) => setRemoteSpeaking((items) => items[peer.id] === speaking ? items : { ...items, [peer.id]: speaking }),
     })),
   ];
   const spotlightTile = videoTiles.find((tile) => tile.id === spotlightId && tile.active) ?? null;
@@ -1865,7 +1850,6 @@ export default function Home() {
               volume={spotlightTile.volume}
               liveVolume={spotlightTile.liveVolume}
               isScreenShare={spotlightTile.isScreenShare}
-              onSpeakingChange={spotlightTile.onSpeakingChange}
               isSpotlight
               isSelected
             />
@@ -1890,7 +1874,6 @@ export default function Home() {
                 volume={tile.volume}
                 liveVolume={tile.liveVolume}
                 isScreenShare={tile.isScreenShare}
-                onSpeakingChange={tile.onSpeakingChange}
                 isSelected={spotlightId === tile.id && tile.active}
                 onSelect={tile.active ? () => setSpotlightId((current) => (current === tile.id ? "" : tile.id)) : undefined}
               />
@@ -2144,7 +2127,6 @@ function VideoTile({
   isScreenShare = false,
   isSpotlight = false,
   isSelected = false,
-  onSpeakingChange,
   onSelect,
 }: {
   stream: MediaStream | null;
@@ -2164,18 +2146,12 @@ function VideoTile({
   isScreenShare?: boolean;
   isSpotlight?: boolean;
   isSelected?: boolean;
-  onSpeakingChange?: (speaking: boolean) => void;
   onSelect?: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const voiceAudioRef = useRef<HTMLAudioElement | null>(null);
   const screenAudioRef = useRef<HTMLAudioElement | null>(null);
   const tileRef = useRef<HTMLDivElement | null>(null);
-  const onSpeakingChangeRef = useRef(onSpeakingChange);
-
-  useEffect(() => {
-    onSpeakingChangeRef.current = onSpeakingChange;
-  }, [onSpeakingChange]);
 
   useEffect(() => {
     if (videoRef.current) {
@@ -2215,48 +2191,6 @@ function VideoTile({
       screenAudioRef.current.volume = Math.max(0, Math.min(1, liveVolume));
     }
   }, [liveVolume]);
-
-  useEffect(() => {
-    if (!voiceStream || !onSpeakingChangeRef.current) {
-      onSpeakingChangeRef.current?.(false);
-      return undefined;
-    }
-
-    const audioContext = new AudioContext();
-    const source = audioContext.createMediaStreamSource(voiceStream);
-    const analyser = audioContext.createAnalyser();
-    const data = new Uint8Array(512);
-    let animationFrame = 0;
-    let lastSpeaking = false;
-
-    analyser.fftSize = 512;
-    source.connect(analyser);
-
-    const measure = () => {
-      analyser.getByteTimeDomainData(data);
-      let total = 0;
-      for (const value of data) {
-        const centered = value - 128;
-        total += centered * centered;
-      }
-      const volumeLevel = Math.sqrt(total / data.length);
-      const speaking = volumeLevel > 8;
-      if (speaking !== lastSpeaking) {
-        lastSpeaking = speaking;
-        onSpeakingChangeRef.current?.(speaking);
-      }
-      animationFrame = window.requestAnimationFrame(measure);
-    };
-
-    measure();
-
-    return () => {
-      window.cancelAnimationFrame(animationFrame);
-      source.disconnect();
-      audioContext.close().catch(() => undefined);
-      onSpeakingChangeRef.current?.(false);
-    };
-  }, [voiceStream]);
 
   function openFullscreen(event: MouseEvent<HTMLButtonElement>) {
     event.stopPropagation();
