@@ -3,7 +3,7 @@ import handler from "vinext/server/app-router-entry";
 
 interface Env {
   ASSETS: Fetcher;
-  DB: D1Database;
+  DB?: D1Database;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
@@ -37,10 +37,152 @@ type SignalRow = {
   created_at: number;
 };
 
+type LocalStore = {
+  nextMessageId: number;
+  nextSignalId: number;
+  messages: ChatMessageRow[];
+  signals: SignalRow[];
+};
+
 const jsonHeaders = {
   "content-type": "application/json; charset=utf-8",
   "cache-control": "no-store",
 };
+
+const emptyStore = (): LocalStore => ({
+  nextMessageId: 1,
+  nextSignalId: 1,
+  messages: [],
+  signals: [],
+});
+
+async function readLocalStore(): Promise<LocalStore> {
+  const globalStore = globalThis as typeof globalThis & {
+    __sharetalkStore?: LocalStore;
+  };
+
+  if (globalStore.__sharetalkStore) {
+    return globalStore.__sharetalkStore;
+  }
+
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  const filePath =
+    process.env.SHARETALK_DATA_FILE ??
+    path.join(process.cwd(), ".data", "sharetalk-store.json");
+
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    globalStore.__sharetalkStore = JSON.parse(raw) as LocalStore;
+  } catch {
+    globalStore.__sharetalkStore = emptyStore();
+  }
+
+  return globalStore.__sharetalkStore;
+}
+
+async function writeLocalStore(store: LocalStore) {
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  const filePath =
+    process.env.SHARETALK_DATA_FILE ??
+    path.join(process.cwd(), ".data", "sharetalk-store.json");
+
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, JSON.stringify(store, null, 2), "utf8");
+}
+
+async function handleLocalMessages(request: Request) {
+  const url = new URL(request.url);
+  const store = await readLocalStore();
+
+  if (request.method === "GET") {
+    const roomId = cleanText(url.searchParams.get("roomId"), "sala-amigos", 120);
+    const messages = store.messages
+      .filter((message) => message.room_id === roomId)
+      .sort((a, b) => a.created_at - b.created_at || a.id - b.id)
+      .slice(-300)
+      .map(toMessage);
+
+    return json({ messages });
+  }
+
+  if (request.method === "POST") {
+    const body = (await request.json()) as Record<string, unknown>;
+    const roomId = cleanText(body.roomId, "sala-amigos", 120);
+    const authorId = cleanText(body.authorId, "pessoa", 80);
+    const authorName = cleanText(body.authorName, "Amigo", 48);
+    const message = cleanText(body.body, "", 1500);
+
+    if (!message) {
+      return json({ error: "Mensagem vazia." }, 400);
+    }
+
+    const row: ChatMessageRow = {
+      id: store.nextMessageId++,
+      room_id: roomId,
+      author_id: authorId,
+      author_name: authorName,
+      body: message,
+      created_at: Date.now(),
+    };
+
+    store.messages.push(row);
+    store.messages = store.messages.slice(-5000);
+    await writeLocalStore(store);
+
+    return json({ message: toMessage(row) }, 201);
+  }
+
+  return json({ error: "Metodo nao permitido." }, 405);
+}
+
+async function handleLocalSignals(request: Request) {
+  const url = new URL(request.url);
+  const store = await readLocalStore();
+
+  if (request.method === "GET") {
+    const roomId = cleanText(url.searchParams.get("roomId"), "sala-amigos", 120);
+    const after = Number(url.searchParams.get("after") ?? "0");
+    const signals = store.signals
+      .filter((signal) => signal.room_id === roomId && signal.id > (Number.isFinite(after) ? after : 0))
+      .sort((a, b) => a.id - b.id)
+      .slice(0, 200);
+
+    return json({
+      signals: signals.map(toSignal),
+      lastId: signals.at(-1)?.id ?? after,
+    });
+  }
+
+  if (request.method === "POST") {
+    const body = (await request.json()) as Record<string, unknown>;
+    const roomId = cleanText(body.roomId, "sala-amigos", 120);
+    const senderId = cleanText(body.senderId, "pessoa", 80);
+    const recipientId = typeof body.recipientId === "string" ? cleanText(body.recipientId, "", 80) : null;
+    const kind = cleanText(body.kind, "", 24);
+
+    if (!["join", "offer", "answer", "ice", "leave"].includes(kind)) {
+      return json({ error: "Sinal invalido." }, 400);
+    }
+
+    store.signals.push({
+      id: store.nextSignalId++,
+      room_id: roomId,
+      sender_id: senderId,
+      recipient_id: recipientId,
+      kind,
+      payload: JSON.stringify(body.payload ?? {}),
+      created_at: Date.now(),
+    });
+    store.signals = store.signals.slice(-2000);
+    await writeLocalStore(store);
+
+    return json({ ok: true }, 201);
+  }
+
+  return json({ error: "Metodo nao permitido." }, 405);
+}
 
 async function ensureSchema(db: D1Database) {
   await db.batch([
@@ -108,6 +250,10 @@ function toSignal(row: SignalRow) {
 }
 
 async function handleMessages(request: Request, env: Env) {
+  if (!env.DB) {
+    return handleLocalMessages(request);
+  }
+
   await ensureSchema(env.DB);
   const url = new URL(request.url);
 
@@ -153,6 +299,10 @@ async function handleMessages(request: Request, env: Env) {
 }
 
 async function handleSignals(request: Request, env: Env) {
+  if (!env.DB) {
+    return handleLocalSignals(request);
+  }
+
   await ensureSchema(env.DB);
   const url = new URL(request.url);
 
