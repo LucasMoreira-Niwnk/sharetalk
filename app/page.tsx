@@ -1385,14 +1385,19 @@ export default function Home() {
 
   function getDisplayMediaOptions(): DisplayMediaStreamOptions {
     return {
-      video: true,
+      video: {
+        displaySurface: "window",
+      },
       audio: {
+        suppressLocalAudioPlayback: false,
         echoCancellation: true,
         noiseSuppression: false,
         autoGainControl: false,
       },
+      preferCurrentTab: false,
       systemAudio: "include",
       windowAudio: "system",
+      monitorTypeSurfaces: "include",
       selfBrowserSurface: "include",
       surfaceSwitching: "include",
     } as DisplayMediaStreamOptions;
@@ -1423,6 +1428,7 @@ export default function Home() {
       const stream = await navigator.mediaDevices.getDisplayMedia(getDisplayMediaOptions());
       const [track] = stream.getVideoTracks();
       const sharingAudio = startScreenAudioShare(stream);
+      const displaySurface = track.getSettings().displaySurface;
       replaceVideoTrack(track);
       track.onended = () => {
         try {
@@ -1453,7 +1459,13 @@ export default function Home() {
         screenOn: true,
       }).catch(() => undefined);
       postPresence().catch(() => undefined);
-      setStatus(sharingAudio ? "Tela compartilhada com audio." : "Tela compartilhada sem audio da aba/tela.");
+      if (sharingAudio) {
+        setStatus(displaySurface === "window"
+          ? "Janela compartilhada com audio do sistema."
+          : "Tela compartilhada com audio.");
+      } else {
+        setStatus("Tela compartilhada sem audio. No Windows, marque Compartilhar audio no seletor do Chrome/Edge; se a janela nao oferecer audio, compartilhe a tela inteira ou uma aba.");
+      }
     } catch {
       setError("Nao consegui iniciar o compartilhamento de tela.");
     }
