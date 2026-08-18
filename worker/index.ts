@@ -162,7 +162,7 @@ async function handleLocalSignals(request: Request) {
     const recipientId = typeof body.recipientId === "string" ? cleanText(body.recipientId, "", 80) : null;
     const kind = cleanText(body.kind, "", 24);
 
-    if (!["join", "offer", "answer", "ice", "leave"].includes(kind)) {
+    if (!["join", "offer", "answer", "ice", "leave", "state"].includes(kind)) {
       return json({ error: "Sinal invalido." }, 400);
     }
 
@@ -333,7 +333,7 @@ async function handleSignals(request: Request, env?: Env) {
     const recipientId = typeof body.recipientId === "string" ? cleanText(body.recipientId, "", 80) : null;
     const kind = cleanText(body.kind, "", 24);
 
-    if (!["join", "offer", "answer", "ice", "leave"].includes(kind)) {
+    if (!["join", "offer", "answer", "ice", "leave", "state"].includes(kind)) {
       return json({ error: "Sinal invalido." }, 400);
     }
 

@@ -550,26 +550,29 @@ h1 {
   flex-direction: column;
   gap: 14px;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 18px;
   background: #1e222a;
 }
 
 .video-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
   gap: 14px;
   align-content: start;
+  align-items: stretch;
   min-height: 0;
 }
 
 .video-grid.has-spotlight {
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
 }
 
 .video-tile,
 .empty-tile {
   position: relative;
-  min-height: 230px;
+  min-width: 0;
+  min-height: 210px;
   aspect-ratio: 16 / 10;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -599,6 +602,10 @@ h1 {
   height: 100%;
   object-fit: cover;
   background: #090b0e;
+}
+
+.video-tile audio {
+  display: none;
 }
 
 .video-tile:not(.is-active) video {
@@ -777,6 +784,34 @@ h1 {
   color: var(--muted);
   font-size: 0.78rem;
   font-weight: 650;
+}
+
+.device-notice {
+  display: grid;
+  gap: 8px;
+  border: 1px solid rgba(242, 184, 75, 0.26);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(242, 184, 75, 0.08);
+}
+
+.device-notice.insecure,
+.device-notice.denied,
+.device-notice.unsupported {
+  border-color: rgba(226, 84, 84, 0.28);
+  background: rgba(226, 84, 84, 0.08);
+}
+
+.device-notice p,
+.device-ok {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.35;
+}
+
+.device-ok {
+  color: #88e5d1;
 }
 
 .device-panel button:not(.icon-button) {

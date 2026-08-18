@@ -16,7 +16,7 @@ type SignalMessage = {
   roomId: string;
   senderId: string;
   recipientId: string | null;
-  kind: "join" | "offer" | "answer" | "ice" | "leave";
+  kind: "join" | "offer" | "answer" | "ice" | "leave" | "state";
   payload: Record<string, unknown>;
   createdAt: number;
 };
@@ -25,6 +25,9 @@ type RemotePeer = {
   id: string;
   name: string;
   stream: MediaStream | null;
+  micOn: boolean;
+  cameraOn: boolean;
+  screenOn: boolean;
 };
 
 type DeviceSelections = {
@@ -57,6 +60,10 @@ function makeId(prefix: string) {
 
 function cleanServerId(value: string) {
   return value.trim().replace(/[^a-zA-Z0-9_-]/g, "-") || DEFAULT_SERVER;
+}
+
+function asBoolean(value: unknown, fallback = false) {
+  return typeof value === "boolean" ? value : fallback;
 }
 
 function getServerFromUrl(current: URL) {
@@ -106,6 +113,8 @@ export default function Home() {
   const [audioMuted, setAudioMuted] = useState(false);
   const [devicesOpen, setDevicesOpen] = useState(false);
   const [spotlightId, setSpotlightId] = useState("");
+  const [mediaAccessStatus, setMediaAccessStatus] = useState<"unknown" | "granted" | "insecure" | "unsupported" | "denied">("unknown");
+  const [mediaAccessMessage, setMediaAccessMessage] = useState("");
   const [mediaDevices, setMediaDevices] = useState<MediaDeviceInfo[]>([]);
   const [deviceSelections, setDeviceSelections] = useState<DeviceSelections>({
     audioInputId: "",
@@ -141,6 +150,13 @@ export default function Home() {
     setServers(nextServers);
     setName(storedName);
     setDraftName(storedName);
+    if (!window.isSecureContext) {
+      setMediaAccessStatus("insecure");
+      setMediaAccessMessage("Camera e microfone so funcionam em HTTPS ou localhost.");
+    } else if (!navigator.mediaDevices?.getUserMedia) {
+      setMediaAccessStatus("unsupported");
+      setMediaAccessMessage("Este navegador nao disponibilizou camera e microfone para esta pagina.");
+    }
     setIsReady(true);
   }, []);
 
@@ -228,7 +244,12 @@ export default function Home() {
 
   useEffect(() => {
     if (isReady && localStream && clientId) {
-      postSignal("join", { name: name || "Amigo" }).catch(() => undefined);
+      postSignal("join", {
+        name: name || "Amigo",
+        micOn: localStream.getAudioTracks().some((track) => track.enabled),
+        cameraOn: localStream.getVideoTracks().some((track) => track.enabled),
+        screenOn: Boolean(screenStreamRef.current),
+      }).catch(() => undefined);
     }
   }, [clientId, isReady, localStream, name, postSignal, selectedVoiceChannel]);
 
@@ -245,7 +266,7 @@ export default function Home() {
         if (items.some((item) => item.id === peerId)) {
           return items;
         }
-        return [...items, { id: peerId, name: peerName, stream: null }];
+        return [...items, { id: peerId, name: peerName, stream: null, micOn: false, cameraOn: false, screenOn: false }];
       });
 
       localStreamRef.current?.getTracks().forEach((track) => {
@@ -253,9 +274,23 @@ export default function Home() {
       });
 
       peer.ontrack = (event) => {
-        const [stream] = event.streams;
         setRemotePeers((items) =>
-          items.map((item) => (item.id === peerId ? { ...item, stream, name: peerName } : item)),
+          items.map((item) => {
+            if (item.id !== peerId) {
+              return item;
+            }
+
+            const existingTracks = item.stream?.getTracks() ?? [];
+            const streamTracks = event.streams[0]?.getTracks() ?? [event.track];
+            const nextStream = new MediaStream(existingTracks);
+            streamTracks.forEach((track) => {
+              if (!nextStream.getTracks().some((currentTrack) => currentTrack.id === track.id)) {
+                nextStream.addTrack(track);
+              }
+            });
+
+            return { ...item, stream: nextStream, name: peerName };
+          }),
         );
       };
 
@@ -274,9 +309,26 @@ export default function Home() {
         }
       };
 
+      peer.onnegotiationneeded = () => {
+        if (!localStreamRef.current || peer.signalingState !== "stable") {
+          return;
+        }
+
+        peer
+          .createOffer()
+          .then(async (offer) => {
+            if (peer.signalingState !== "stable") {
+              return;
+            }
+            await peer.setLocalDescription(offer);
+            await postSignal("offer", { description: offer, name: name || "Amigo" }, peerId);
+          })
+          .catch(() => undefined);
+      };
+
       return peer;
     },
-    [postSignal],
+    [name, postSignal],
   );
 
   const replaceVideoTrack = useCallback((track: MediaStreamTrack | null) => {
@@ -335,7 +387,15 @@ export default function Home() {
   }, []);
 
   const refreshDevices = useCallback(async () => {
+    if (!window.isSecureContext) {
+      setMediaAccessStatus("insecure");
+      setMediaAccessMessage("Use HTTPS para listar e permitir camera/microfone.");
+      return;
+    }
+
     if (!navigator.mediaDevices?.enumerateDevices) {
+      setMediaAccessStatus("unsupported");
+      setMediaAccessMessage("Este navegador nao permite listar dispositivos nesta pagina.");
       return;
     }
 
@@ -380,8 +440,54 @@ export default function Home() {
     }
   }, [getMediaConstraints, refreshDevices, replaceAudioTrack, replaceVideoTrack]);
 
+  const requestDeviceAccess = useCallback(async () => {
+    setError("");
+
+    if (!window.isSecureContext) {
+      setMediaAccessStatus("insecure");
+      setMediaAccessMessage("Acesse por HTTPS para o navegador liberar camera e microfone.");
+      setError("Camera e microfone exigem HTTPS. Use seu dominio com Certbot, nao o IP em HTTP.");
+      return null;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setMediaAccessStatus("unsupported");
+      setMediaAccessMessage("Este navegador nao disponibilizou permissoes de midia.");
+      return null;
+    }
+
+    try {
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints());
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      }
+
+      setMediaAccessStatus("granted");
+      setMediaAccessMessage("Permissao concedida. Dispositivos carregados.");
+      await refreshDevices();
+
+      if (!localStreamRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+      }
+
+      return stream;
+    } catch {
+      setMediaAccessStatus("denied");
+      setMediaAccessMessage("Permissao negada ou nenhum dispositivo disponivel.");
+      setError("O navegador bloqueou camera/microfone. Libere a permissao no cadeado da barra de endereco.");
+      return null;
+    }
+  }, [getMediaConstraints, refreshDevices]);
+
   const ensureMedia = useCallback(async () => {
     setError("");
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+      await requestDeviceAccess();
+      return null;
+    }
+
     try {
       let stream: MediaStream;
       try {
@@ -402,13 +508,20 @@ export default function Home() {
         setStatus("Camera e microfone conectados.");
       }
       await refreshDevices();
-      await postSignal("join", { name: name || "Amigo" });
+      setMediaAccessStatus("granted");
+      setMediaAccessMessage("Permissao concedida. Dispositivos carregados.");
+      await postSignal("join", {
+        name: name || "Amigo",
+        micOn: stream.getAudioTracks().some((track) => track.enabled),
+        cameraOn: stream.getVideoTracks().some((track) => track.enabled),
+        screenOn: Boolean(screenStreamRef.current),
+      });
       return stream;
     } catch {
       setError("Permita camera ou microfone no navegador para entrar na chamada.");
       return null;
     }
-  }, [deviceSelections.audioInputId, getMediaConstraints, name, postSignal, refreshDevices]);
+  }, [deviceSelections.audioInputId, getMediaConstraints, name, postSignal, refreshDevices, requestDeviceAccess]);
 
   const joinCall = useCallback(async () => {
     const stream = localStreamRef.current ?? (await ensureMedia());
@@ -423,7 +536,12 @@ export default function Home() {
         }
       });
     });
-    await postSignal("join", { name: name || "Amigo" });
+    await postSignal("join", {
+      name: name || "Amigo",
+      micOn: stream.getAudioTracks().some((track) => track.enabled),
+      cameraOn: stream.getVideoTracks().some((track) => track.enabled),
+      screenOn: Boolean(screenStreamRef.current),
+    });
     setStatus(`Conectado ao canal de voz ${currentVoiceChannel.name}.`);
   }, [currentVoiceChannel.name, ensureMedia, name, postSignal]);
 
@@ -438,6 +556,12 @@ export default function Home() {
 
       knownSignalsRef.current.add(signal.id);
       const peerName = typeof signal.payload.name === "string" ? signal.payload.name : "Amigo";
+      const mediaState = {
+        name: peerName,
+        micOn: asBoolean(signal.payload.micOn, true),
+        cameraOn: asBoolean(signal.payload.cameraOn),
+        screenOn: asBoolean(signal.payload.screenOn),
+      };
 
       if (signal.kind === "leave") {
         peersRef.current.get(signal.senderId)?.close();
@@ -447,12 +571,29 @@ export default function Home() {
       }
 
       const peer = createPeer(signal.senderId, peerName);
+      setRemotePeers((items) =>
+        items.map((item) => (item.id === signal.senderId ? { ...item, ...mediaState } : item)),
+      );
+
+      if (signal.kind === "state") {
+        return;
+      }
 
       if (signal.kind === "join") {
         if (localStreamRef.current && clientId > signal.senderId) {
           const offer = await peer.createOffer();
           await peer.setLocalDescription(offer);
-          await postSignal("offer", { description: offer, name: name || "Amigo" }, signal.senderId);
+          await postSignal(
+            "offer",
+            {
+              description: offer,
+              name: name || "Amigo",
+              micOn,
+              cameraOn,
+              screenOn: Boolean(screenStreamRef.current),
+            },
+            signal.senderId,
+          );
         }
         return;
       }
@@ -464,7 +605,17 @@ export default function Home() {
         }
         const answer = await peer.createAnswer();
         await peer.setLocalDescription(answer);
-        await postSignal("answer", { description: answer, name: name || "Amigo" }, signal.senderId);
+        await postSignal(
+          "answer",
+          {
+            description: answer,
+            name: name || "Amigo",
+            micOn,
+            cameraOn,
+            screenOn: Boolean(screenStreamRef.current),
+          },
+          signal.senderId,
+        );
         return;
       }
 
@@ -477,7 +628,7 @@ export default function Home() {
         await peer.addIceCandidate(signal.payload.candidate as RTCIceCandidateInit);
       }
     },
-    [clientId, createPeer, name, postSignal],
+    [cameraOn, clientId, createPeer, micOn, name, postSignal],
   );
 
   useEffect(() => {
@@ -585,6 +736,12 @@ export default function Home() {
     }
     audioTrack.enabled = !audioTrack.enabled;
     setMicOn(audioTrack.enabled);
+    postSignal("state", {
+      name: name || "Amigo",
+      micOn: audioTrack.enabled,
+      cameraOn,
+      screenOn: Boolean(screenStreamRef.current),
+    }).catch(() => undefined);
   }
 
   function toggleCamera() {
@@ -594,6 +751,12 @@ export default function Home() {
     }
     videoTrack.enabled = !videoTrack.enabled;
     setCameraOn(videoTrack.enabled);
+    postSignal("state", {
+      name: name || "Amigo",
+      micOn,
+      cameraOn: videoTrack.enabled,
+      screenOn: Boolean(screenStreamRef.current),
+    }).catch(() => undefined);
   }
 
   function disconnectCall() {
@@ -618,6 +781,12 @@ export default function Home() {
       replaceVideoTrack(cameraTrack);
       screenStream.getTracks().forEach((track) => track.stop());
       setScreenStream(null);
+      postSignal("state", {
+        name: name || "Amigo",
+        micOn,
+        cameraOn: Boolean(cameraTrack && cameraTrack.enabled),
+        screenOn: false,
+      }).catch(() => undefined);
       setStatus("Compartilhamento encerrado.");
       return;
     }
@@ -633,8 +802,20 @@ export default function Home() {
           setError("A conexao de video ja tinha sido encerrada.");
         }
         setScreenStream(null);
+        postSignal("state", {
+          name: name || "Amigo",
+          micOn,
+          cameraOn: Boolean(localStreamRef.current?.getVideoTracks()[0]?.enabled),
+          screenOn: false,
+        }).catch(() => undefined);
       };
       setScreenStream(stream);
+      postSignal("state", {
+        name: name || "Amigo",
+        micOn,
+        cameraOn: true,
+        screenOn: true,
+      }).catch(() => undefined);
       setStatus("Tela compartilhada.");
     } catch {
       setError("Nao consegui iniciar o compartilhamento de tela.");
@@ -721,9 +902,9 @@ export default function Home() {
       stream: peer.stream,
       label: peer.name,
       muted: audioMuted,
-      active: Boolean(peer.stream),
-      micOn: true,
-      cameraOn: Boolean(peer.stream),
+      active: Boolean(peer.stream && (peer.cameraOn || peer.screenOn) && peer.stream.getVideoTracks().some((track) => track.readyState === "live")),
+      micOn: peer.micOn,
+      cameraOn: peer.cameraOn || peer.screenOn,
       connectionLabel: peer.stream ? "Conectado" : "Conectando",
       isSpeaking: false,
       audioOutputId: deviceSelections.audioOutputId,
@@ -931,11 +1112,22 @@ export default function Home() {
                 <span className="icon icon-close" />
               </button>
             </div>
+            {mediaAccessStatus !== "granted" ? (
+              <div className={`device-notice ${mediaAccessStatus}`}>
+                <p>{mediaAccessMessage || "Permita acesso para carregar nomes de microfone, camera e saida de audio."}</p>
+                <button type="button" onClick={() => requestDeviceAccess().catch(() => undefined)}>
+                  Permitir acesso
+                </button>
+              </div>
+            ) : (
+              <p className="device-ok">{mediaAccessMessage || "Dispositivos liberados."}</p>
+            )}
             <label htmlFor="audio-input">Microfone</label>
             <select
               id="audio-input"
               value={deviceSelections.audioInputId}
               onChange={(event) => setDeviceSelections((value) => ({ ...value, audioInputId: event.target.value }))}
+              disabled={mediaAccessStatus === "insecure" || mediaAccessStatus === "unsupported"}
             >
               <option value="">Padrao do navegador</option>
               {audioInputDevices.map((device, index) => (
@@ -950,6 +1142,7 @@ export default function Home() {
               id="video-input"
               value={deviceSelections.videoInputId}
               onChange={(event) => setDeviceSelections((value) => ({ ...value, videoInputId: event.target.value }))}
+              disabled={mediaAccessStatus === "insecure" || mediaAccessStatus === "unsupported"}
             >
               <option value="">Padrao do navegador</option>
               {videoInputDevices.map((device, index) => (
@@ -964,6 +1157,7 @@ export default function Home() {
               id="audio-output"
               value={deviceSelections.audioOutputId}
               onChange={(event) => setDeviceSelections((value) => ({ ...value, audioOutputId: event.target.value }))}
+              disabled={mediaAccessStatus === "insecure" || mediaAccessStatus === "unsupported"}
             >
               <option value="">Padrao do navegador</option>
               {audioOutputDevices.map((device, index) => (
@@ -973,7 +1167,7 @@ export default function Home() {
               ))}
             </select>
 
-            <button type="button" onClick={() => applySelectedDevices().catch(() => undefined)}>
+            <button type="button" onClick={() => applySelectedDevices().catch(() => undefined)} disabled={mediaAccessStatus === "insecure" || mediaAccessStatus === "unsupported"}>
               Aplicar dispositivos
             </button>
           </section>
@@ -1078,21 +1272,27 @@ function VideoTile({
   onSelect?: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const tileRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (videoRef.current) {
       videoRef.current.srcObject = stream;
+      videoRef.current.play().catch(() => undefined);
+    }
+    if (audioRef.current) {
+      audioRef.current.srcObject = stream;
+      audioRef.current.play().catch(() => undefined);
     }
   }, [stream]);
 
   useEffect(() => {
-    const video = videoRef.current as (HTMLVideoElement & {
+    const audio = audioRef.current as (HTMLAudioElement & {
       setSinkId?: (sinkId: string) => Promise<void>;
     }) | null;
 
-    if (video?.setSinkId) {
-      video.setSinkId(audioOutputId).catch(() => undefined);
+    if (audio?.setSinkId) {
+      audio.setSinkId(audioOutputId).catch(() => undefined);
     }
   }, [audioOutputId]);
 
@@ -1117,7 +1317,8 @@ function VideoTile({
       aria-label={onSelect ? `Destacar ${label}` : undefined}
       title={onSelect ? `Destacar ${label}` : undefined}
     >
-      <video ref={videoRef} autoPlay playsInline muted={muted} />
+      <video ref={videoRef} autoPlay playsInline muted />
+      <audio ref={audioRef} autoPlay muted={muted} />
       {!active ? <div className="avatar-fallback">{label.slice(0, 1).toUpperCase()}</div> : null}
       <div className="tile-badges">
         <span className={connectionLabel === "Conectado" ? "badge-online" : "badge-offline"}>{connectionLabel}</span>
