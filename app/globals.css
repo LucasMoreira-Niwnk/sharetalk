@@ -334,16 +334,14 @@ p {
 }
 
 h1 {
-  margin-bottom: 10px;
+  margin: 0;
   color: #fff;
   font-size: clamp(1.25rem, 2vw, 1.8rem);
   font-weight: 610;
   line-height: 1.1;
 }
 
-.top-actions,
 .inline-fields,
-.control-bar,
 .status-pills {
   display: flex;
   gap: 10px;
@@ -749,26 +747,6 @@ h1 {
   line-height: 1.4;
 }
 
-.control-bar {
-  align-items: center;
-  flex-wrap: wrap;
-  padding: 14px 18px;
-  border-top: 1px solid var(--line);
-  background: #20242d;
-}
-
-.status-line {
-  min-height: 38px;
-  padding: 0 18px 16px;
-  color: var(--muted);
-  font-size: 0.95rem;
-  background: #20242d;
-}
-
-.status-line[role="alert"] {
-  color: #ffadad;
-}
-
 .side-panel {
   display: flex;
   flex-direction: column;
@@ -780,14 +758,19 @@ h1 {
 }
 
 .voice-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: grid;
   gap: 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 12px;
   background: #282d37;
+}
+
+.voice-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .voice-card-main {
@@ -806,6 +789,47 @@ h1 {
   margin: 0;
   color: var(--muted);
   font-size: 0.86rem;
+}
+
+.side-status-pills {
+  gap: 7px;
+}
+
+.side-status-pills .status-pill {
+  min-height: 24px;
+  padding: 0 9px;
+  font-size: 0.74rem;
+}
+
+.side-join {
+  width: 100%;
+  justify-content: center;
+}
+
+.side-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.side-controls .icon-button {
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  min-height: 40px;
+}
+
+.side-status-line {
+  min-height: 20px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.35;
+}
+
+.side-status-line[role="alert"] {
+  color: #ffadad;
 }
 
 .device-panel {
@@ -1025,15 +1049,13 @@ h1 {
   }
 
   .topbar,
-  .top-actions,
   .inline-fields,
   .composer {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .status-pills,
-  .control-bar {
+  .status-pills {
     align-items: stretch;
   }
 
@@ -1045,10 +1067,6 @@ h1 {
   .video-tile,
   .empty-tile {
     min-height: 190px;
-  }
-
-  .control-bar button {
-    flex: 1 1 100%;
   }
 
   .side-panel {

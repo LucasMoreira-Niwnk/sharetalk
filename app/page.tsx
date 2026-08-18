@@ -1389,24 +1389,6 @@ export default function Home() {
           <div>
             <p className="eyebrow">Papo ao vivo</p>
             <h1>{serverId}</h1>
-            <div className="status-pills" aria-label="Status da chamada">
-              <span className={`status-pill ${isConnected ? "is-online" : "is-offline"}`}>
-                {connectionLabel}
-              </span>
-              <span className={`status-pill ${micOn && isConnected ? "is-online" : "is-muted"}`}>
-                Mic {micOn && isConnected ? "ligado" : "mudo"}
-              </span>
-              <span className={`status-pill ${cameraOn && isConnected ? "is-online" : "is-muted"}`}>
-                Cam {cameraOn && isConnected ? "ligada" : "pausada"}
-              </span>
-            </div>
-          </div>
-          <div className="top-actions">
-            {!isConnected ? (
-              <button type="button" className="primary-button" onClick={joinCall} disabled={!isReady}>
-                Entrar no canal
-              </button>
-            ) : null}
           </div>
         </header>
 
@@ -1466,52 +1448,71 @@ export default function Home() {
           </div>
         </div>
 
-        {isConnected ? (
-          <div className="control-bar" aria-label="Controles da chamada">
-            <button type="button" className={`icon-button ${micOn ? "control-on" : "control-off"}`} onClick={toggleMic} aria-label={micOn ? "Mutar microfone" : "Ativar microfone"} title={micOn ? "Mutar microfone" : "Ativar microfone"}>
-              <span className="icon icon-mic" />
-            </button>
-            <button type="button" className={`icon-button ${cameraOn ? "control-on" : "control-off"}`} onClick={toggleCamera} aria-label={cameraOn ? "Pausar camera" : "Ativar camera"} title={cameraOn ? "Pausar camera" : "Ativar camera"}>
-              <span className="icon icon-camera" />
-            </button>
-            <button type="button" className={`icon-button ${screenStream ? "control-on" : ""}`} onClick={shareScreen} aria-label={screenStream ? "Parar compartilhamento" : "Compartilhar tela"} title={screenStream ? "Parar compartilhamento" : "Compartilhar tela"}>
-              <span className="icon icon-screen" />
-            </button>
-            <button type="button" className={`icon-button ${audioMuted ? "control-off" : ""}`} onClick={() => setAudioMuted((value) => !value)} aria-label={audioMuted ? "Ouvir amigos" : "Mutar audio dos amigos"} title={audioMuted ? "Ouvir amigos" : "Mutar audio dos amigos"}>
-              <span className="icon icon-audio" />
-            </button>
-            <button type="button" className="icon-button danger-button" onClick={disconnectCall} aria-label="Sair do canal" title="Sair do canal">
-              <span className="icon icon-phone" />
-            </button>
-          </div>
-        ) : null}
-
-        <div className="status-line" role={error ? "alert" : "status"}>
-          {error || status}
-        </div>
       </section>
 
       <aside className="side-panel" aria-label="Chat e servidor">
         <section className="voice-card" aria-label="Resumo do canal de voz">
-          <div className="voice-card-main">
-            <div>
-              <span className={`presence-dot ${isConnected ? "is-online" : "is-offline"}`} />
-              <strong>{currentVoiceChannel.name}</strong>
+          <div className="voice-card-header">
+            <div className="voice-card-main">
+              <div>
+                <span className={`presence-dot ${isConnected ? "is-online" : "is-offline"}`} />
+                <strong>{currentVoiceChannel.name}</strong>
+              </div>
+              <p>{connectionLabel} · {activeParticipants} na voz</p>
             </div>
-            <p>{connectionLabel} · {activeParticipants} na voz</p>
+            <button
+              type="button"
+              className="icon-button compact"
+              aria-label="Selecionar dispositivos"
+              title="Selecionar dispositivos"
+              onClick={() => {
+                setDevicesOpen((value) => !value);
+                refreshDevices().catch(() => undefined);
+              }}
+            >
+              <span className="icon icon-settings" />
+            </button>
           </div>
-          <button
-            type="button"
-            className="icon-button compact"
-            aria-label="Selecionar dispositivos"
-            title="Selecionar dispositivos"
-            onClick={() => {
-              setDevicesOpen((value) => !value);
-              refreshDevices().catch(() => undefined);
-            }}
-          >
-            <span className="icon icon-settings" />
-          </button>
+          <div className="status-pills side-status-pills" aria-label="Status da chamada">
+            <span className={`status-pill ${isConnected ? "is-online" : "is-offline"}`}>
+              {connectionLabel}
+            </span>
+            <span className={`status-pill ${micOn && isConnected ? "is-online" : "is-muted"}`}>
+              Mic {micOn && isConnected ? "ligado" : "mudo"}
+            </span>
+            <span className={`status-pill ${cameraOn && isConnected ? "is-online" : "is-muted"}`}>
+              Cam {cameraOn && isConnected ? "ligada" : "pausada"}
+            </span>
+            <span className={`status-pill ${screenStream ? "is-online" : "is-muted"}`}>
+              Tela {screenStream ? "ativa" : "parada"}
+            </span>
+          </div>
+          {!isConnected ? (
+            <button type="button" className="primary-button side-join" onClick={joinCall} disabled={!isReady}>
+              Entrar no canal
+            </button>
+          ) : (
+            <div className="side-controls" aria-label="Controles da chamada">
+              <button type="button" className={`icon-button ${micOn ? "control-on" : "control-off"}`} onClick={toggleMic} aria-label={micOn ? "Mutar microfone" : "Ativar microfone"} title={micOn ? "Mutar microfone" : "Ativar microfone"}>
+                <span className="icon icon-mic" />
+              </button>
+              <button type="button" className={`icon-button ${cameraOn ? "control-on" : "control-off"}`} onClick={toggleCamera} aria-label={cameraOn ? "Pausar camera" : "Ativar camera"} title={cameraOn ? "Pausar camera" : "Ativar camera"}>
+                <span className="icon icon-camera" />
+              </button>
+              <button type="button" className={`icon-button ${screenStream ? "control-on" : ""}`} onClick={shareScreen} aria-label={screenStream ? "Parar compartilhamento" : "Compartilhar tela"} title={screenStream ? "Parar compartilhamento" : "Compartilhar tela"}>
+                <span className="icon icon-screen" />
+              </button>
+              <button type="button" className={`icon-button ${audioMuted ? "control-off" : ""}`} onClick={() => setAudioMuted((value) => !value)} aria-label={audioMuted ? "Ouvir amigos" : "Mutar audio dos amigos"} title={audioMuted ? "Ouvir amigos" : "Mutar audio dos amigos"}>
+                <span className="icon icon-audio" />
+              </button>
+              <button type="button" className="icon-button danger-button" onClick={disconnectCall} aria-label="Sair do canal" title="Sair do canal">
+                <span className="icon icon-phone" />
+              </button>
+            </div>
+          )}
+          <div className="side-status-line" role={error ? "alert" : "status"}>
+            {error || status}
+          </div>
         </section>
 
         {devicesOpen ? (
