@@ -137,6 +137,36 @@ function readImageFile(file: File) {
   });
 }
 
+function playTone(frequency: number, duration = 0.16, gainValue = 0.055) {
+  try {
+    const AudioContextClass = window.AudioContext || (window as typeof window & {
+      webkitAudioContext?: typeof AudioContext;
+    }).webkitAudioContext;
+
+    if (!AudioContextClass) {
+      return;
+    }
+
+    const audioContext = new AudioContextClass();
+    const oscillator = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+    const now = audioContext.currentTime;
+
+    oscillator.type = "sine";
+    oscillator.frequency.setValueAtTime(frequency, now);
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.exponentialRampToValueAtTime(gainValue, now + 0.025);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+    oscillator.connect(gain);
+    gain.connect(audioContext.destination);
+    oscillator.start(now);
+    oscillator.stop(now + duration + 0.03);
+    window.setTimeout(() => audioContext.close().catch(() => undefined), Math.ceil((duration + 0.12) * 1000));
+  } catch {
+    // Notification sounds are optional and must never interrupt the call.
+  }
+}
+
 function serverPath(serverId: string) {
   return `/servers/${encodeURIComponent(serverId)}`;
 }
@@ -212,6 +242,9 @@ export default function Home() {
   const screenAudioTrackRef = useRef<MediaStreamTrack | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const knownSignalsRef = useRef<Set<number>>(new Set());
+  const knownMessageIdsRef = useRef<Set<number>>(new Set());
+  const initialMessagesLoadedRef = useRef(false);
+  const previousScreenSharingIdsRef = useRef<Set<string>>(new Set());
   const autoJoinAttemptedRef = useRef(false);
   const lastSignalIdRef = useRef(0);
   const connectionRequestsRef = useRef<Map<string, number>>(new Map());
@@ -288,7 +321,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (!isReady) {
+    if (!isReady || !currentUser || !clientId) {
       return undefined;
     }
 
@@ -298,7 +331,7 @@ export default function Home() {
     }, 5000);
 
     return () => window.clearInterval(interval);
-  }, [isReady, loadChannels]);
+  }, [clientId, currentUser, isReady, loadChannels]);
 
   const textRoomKey = `${serverId}:texto:${selectedTextChannel}`;
   const voiceRoomKey = `${serverId}:voz:${selectedVoiceChannel}`;
@@ -535,7 +568,7 @@ export default function Home() {
               voiceStream: nextVoiceStream,
               screenAudioStream: nextScreenAudioStream,
               name: peerName,
-              avatarUrl: typeof event.streams[0]?.id === "string" ? item.avatarUrl : item.avatarUrl,
+              avatarUrl: item.avatarUrl,
               connectionId: peerConnectionId || item.connectionId,
             };
           }),
@@ -551,7 +584,7 @@ export default function Home() {
       };
 
       peer.onconnectionstatechange = () => {
-        if (["failed", "closed", "disconnected"].includes(peer.connectionState)) {
+        if (["failed", "closed"].includes(peer.connectionState)) {
           peersRef.current.delete(peerId);
           peerConnectionIdsRef.current.delete(peerId);
           connectionRequestsRef.current.delete(peerId);
@@ -898,12 +931,14 @@ export default function Home() {
           peersRef.current.delete(signal.senderId);
           peerConnectionIdsRef.current.delete(signal.senderId);
           connectionRequestsRef.current.delete(signal.senderId);
+          previousScreenSharingIdsRef.current.delete(signal.senderId);
           setRemotePeers((items) => items.filter((item) => item.id !== signal.senderId));
         }
         return;
       }
 
       if (signal.kind === "state") {
+        const wasSharing = previousScreenSharingIdsRef.current.has(signal.senderId);
         setRemotePeers((items) =>
           items.map((item) =>
             item.id === signal.senderId
@@ -911,9 +946,18 @@ export default function Home() {
               : item,
           ),
         );
+        if (!wasSharing && mediaState.screenOn) {
+          playTone(520, 0.18, 0.05);
+        }
+        if (mediaState.screenOn) {
+          previousScreenSharingIdsRef.current.add(signal.senderId);
+        } else {
+          previousScreenSharingIdsRef.current.delete(signal.senderId);
+        }
         return;
       }
 
+      const wasSharing = previousScreenSharingIdsRef.current.has(signal.senderId);
       const peer = createPeer(signal.senderId, peerName, signalConnectionId);
       setRemotePeers((items) =>
         items.map((item) =>
@@ -922,6 +966,14 @@ export default function Home() {
             : item,
         ),
       );
+      if (!wasSharing && mediaState.screenOn) {
+        playTone(520, 0.18, 0.05);
+      }
+      if (mediaState.screenOn) {
+        previousScreenSharingIdsRef.current.add(signal.senderId);
+      } else {
+        previousScreenSharingIdsRef.current.delete(signal.senderId);
+      }
 
       if (signal.kind === "join") {
         if (localStreamRef.current) {
@@ -1001,7 +1053,14 @@ export default function Home() {
       try {
         const result = await api<{ messages: ChatMessage[] }>(`/api/messages?roomId=${encodeURIComponent(textRoomKey)}`);
         if (!cancelled) {
+          const freshMessages = result.messages.filter((message) => !knownMessageIdsRef.current.has(message.id));
+          const shouldNotify = initialMessagesLoadedRef.current && freshMessages.some((message) => message.authorId !== clientId);
+          result.messages.forEach((message) => knownMessageIdsRef.current.add(message.id));
+          initialMessagesLoadedRef.current = true;
           setMessages(result.messages);
+          if (shouldNotify) {
+            playTone(720, 0.13, 0.045);
+          }
         }
       } catch {
         if (!cancelled) {
@@ -1016,7 +1075,7 @@ export default function Home() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [isReady, textRoomKey]);
+  }, [clientId, currentUser, isReady, textRoomKey]);
 
   useEffect(() => {
     if (!isReady || !clientId || !localStream) {
@@ -1317,6 +1376,7 @@ export default function Home() {
     setLocalStream(null);
     setScreenStream(null);
     setRemotePeers([]);
+    previousScreenSharingIdsRef.current.clear();
     setSpotlightId("");
     setCameraOn(false);
     setMicOn(false);
@@ -1384,6 +1444,7 @@ export default function Home() {
       };
       screenStreamRef.current = stream;
       setScreenStream(stream);
+      playTone(520, 0.18, 0.05);
       postSignal("state", {
         name: name || "Amigo",
         avatarUrl: currentUser?.avatarUrl ?? "",
@@ -1401,6 +1462,8 @@ export default function Home() {
   function switchTextChannel(channelId: string) {
     setSelectedTextChannel(channelId);
     setMessages([]);
+    knownMessageIdsRef.current.clear();
+    initialMessagesLoadedRef.current = false;
     setStatus(`Canal #${channelId} aberto.`);
   }
 
@@ -1417,6 +1480,7 @@ export default function Home() {
     connectionRequestsRef.current.clear();
     setRemotePeers([]);
     setPresenceParticipants([]);
+    previousScreenSharingIdsRef.current.clear();
     lastSignalIdRef.current = 0;
     setLastSignalId(0);
     knownSignalsRef.current.clear();
@@ -1489,6 +1553,8 @@ export default function Home() {
       if (channel.type === "text" && selectedTextChannel === channel.id) {
         setSelectedTextChannel(channels.find((item) => item.id !== channel.id)?.id ?? DEFAULT_TEXT_CHANNELS[0].id);
         setMessages([]);
+        knownMessageIdsRef.current.clear();
+        initialMessagesLoadedRef.current = false;
       }
       if (channel.type === "voice" && selectedVoiceChannel === channel.id) {
         if (localStreamRef.current) {
@@ -1560,6 +1626,9 @@ export default function Home() {
     setDraftName("");
     setProfileOpen(false);
     setAuthPassword("");
+    knownMessageIdsRef.current.clear();
+    initialMessagesLoadedRef.current = false;
+    previousScreenSharingIdsRef.current.clear();
     setStatus("Entre na sua conta para acessar o servidor.");
   }
 
