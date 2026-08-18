@@ -688,15 +688,20 @@ h1 {
   background: rgba(88, 101, 242, 0.9);
 }
 
-.volume-control {
+.volume-stack {
   position: absolute;
   right: 10px;
   bottom: 50px;
   display: grid;
-  grid-template-columns: auto minmax(64px, 1fr) auto;
+  gap: 6px;
+  width: min(190px, calc(100% - 20px));
+}
+
+.volume-control {
+  display: grid;
+  grid-template-columns: 28px minmax(62px, 1fr) auto;
   align-items: center;
   gap: 7px;
-  width: min(168px, calc(100% - 20px));
   border-radius: 8px;
   padding: 7px 8px;
   background: rgba(9, 11, 14, 0.72);
