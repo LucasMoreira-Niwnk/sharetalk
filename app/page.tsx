@@ -148,7 +148,7 @@ export default function Home() {
   const localStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const screenAudioTrackRef = useRef<MediaStreamTrack | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const messagesRef = useRef<HTMLDivElement | null>(null);
   const knownSignalsRef = useRef<Set<number>>(new Set());
   const autoJoinAttemptedRef = useRef(false);
   const lastSignalIdRef = useRef(0);
@@ -197,7 +197,9 @@ export default function Home() {
   }, [screenStream]);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    if (messagesRef.current) {
+      messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
+    }
   }, [messages]);
 
   useEffect(() => {
@@ -1275,15 +1277,21 @@ export default function Home() {
     })),
   ];
   const spotlightTile = videoTiles.find((tile) => tile.id === spotlightId && tile.active) ?? null;
+  const gridTiles = spotlightTile ? videoTiles.filter((tile) => tile.id !== spotlightTile.id) : videoTiles;
   const voiceParticipants = presenceParticipants.length > 0
-    ? presenceParticipants.map((participant) => ({
-        id: participant.clientId,
-        name: participant.clientId === clientId ? visibleName : participant.name,
-        isLocal: participant.clientId === clientId,
-      }))
+    ? presenceParticipants.map((participant) => {
+        const peer = remotePeers.find((item) => item.id === participant.clientId);
+        return {
+          id: participant.clientId,
+          name: participant.clientId === clientId ? visibleName : participant.name,
+          isLocal: participant.clientId === clientId,
+          hasVoice: Boolean(peer?.voiceStream),
+          hasLive: Boolean(peer?.screenAudioStream),
+        };
+      })
     : [
-        ...(isConnected ? [{ id: clientId || "local", name: visibleName, isLocal: true }] : []),
-        ...remotePeers.map((peer) => ({ id: peer.id, name: peer.name, isLocal: false })),
+        ...(isConnected ? [{ id: clientId || "local", name: visibleName, isLocal: true, hasVoice: false, hasLive: false }] : []),
+        ...remotePeers.map((peer) => ({ id: peer.id, name: peer.name, isLocal: false, hasVoice: Boolean(peer.voiceStream), hasLive: Boolean(peer.screenAudioStream) })),
       ];
 
   return (
@@ -1330,7 +1338,43 @@ export default function Home() {
                   {voiceParticipants.map((participant) => (
                     <div className="voice-participant" key={participant.id}>
                       <span>{participant.name.slice(0, 1).toUpperCase()}</span>
-                      <p>{participant.name}{participant.isLocal ? " (voce)" : ""}</p>
+                      <div className="voice-participant-body">
+                        <p>{participant.name}{participant.isLocal ? " (voce)" : ""}</p>
+                        {!participant.isLocal && (participant.hasVoice || participant.hasLive) ? (
+                          <div className="participant-volumes">
+                            {participant.hasVoice ? (
+                              <label>
+                                <small>Voz</small>
+                                <input
+                                  type="range"
+                                  min="0"
+                                  max="1"
+                                  step="0.01"
+                                  value={peerVoiceVolumes[participant.id] ?? 1}
+                                  onChange={(event) => setPeerVoiceVolumes((items) => ({ ...items, [participant.id]: Number(event.target.value) }))}
+                                  aria-label={`Volume da voz de ${participant.name}`}
+                                />
+                                <b>{Math.round((peerVoiceVolumes[participant.id] ?? 1) * 100)}</b>
+                              </label>
+                            ) : null}
+                            {participant.hasLive ? (
+                              <label>
+                                <small>Live</small>
+                                <input
+                                  type="range"
+                                  min="0"
+                                  max="1"
+                                  step="0.01"
+                                  value={peerLiveVolumes[participant.id] ?? 1}
+                                  onChange={(event) => setPeerLiveVolumes((items) => ({ ...items, [participant.id]: Number(event.target.value) }))}
+                                  aria-label={`Volume da live de ${participant.name}`}
+                                />
+                                <b>{Math.round((peerLiveVolumes[participant.id] ?? 1) * 100)}</b>
+                              </label>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1384,23 +1428,13 @@ export default function Home() {
               volume={spotlightTile.volume}
               liveVolume={spotlightTile.liveVolume}
               isScreenShare={spotlightTile.isScreenShare}
-              onVolumeChange={
-                spotlightTile.canControlVolume
-                  ? (volume) => setPeerVoiceVolumes((items) => ({ ...items, [spotlightTile.id]: volume }))
-                  : undefined
-              }
-              onLiveVolumeChange={
-                spotlightTile.canControlLiveVolume
-                  ? (volume) => setPeerLiveVolumes((items) => ({ ...items, [spotlightTile.id]: volume }))
-                  : undefined
-              }
               isSpotlight
               isSelected
             />
           ) : null}
 
           <div className={`video-grid ${spotlightTile ? "has-spotlight" : ""}`}>
-            {videoTiles.map((tile) => (
+            {gridTiles.map((tile) => (
               <VideoTile
                 key={`${tile.id}-${tile.id === localTileId && screenStream ? "screen" : "camera"}`}
                 stream={tile.stream}
@@ -1417,16 +1451,6 @@ export default function Home() {
                 volume={tile.volume}
                 liveVolume={tile.liveVolume}
                 isScreenShare={tile.isScreenShare}
-                onVolumeChange={
-                  tile.canControlVolume
-                    ? (volume) => setPeerVoiceVolumes((items) => ({ ...items, [tile.id]: volume }))
-                    : undefined
-                }
-                onLiveVolumeChange={
-                  tile.canControlLiveVolume
-                    ? (volume) => setPeerLiveVolumes((items) => ({ ...items, [tile.id]: volume }))
-                    : undefined
-                }
                 isSelected={spotlightId === tile.id && tile.active}
                 onSelect={tile.active ? () => setSpotlightId((current) => (current === tile.id ? "" : tile.id)) : undefined}
               />
@@ -1577,7 +1601,7 @@ export default function Home() {
             <h2>#{currentTextChannel.name}</h2>
             <span>{messages.length} mensagens</span>
           </div>
-          <div className="messages">
+          <div className="messages" ref={messagesRef}>
             {messages.length === 0 ? (
               <p className="empty-chat">Nenhuma mensagem ainda.</p>
             ) : (
@@ -1599,7 +1623,6 @@ export default function Home() {
                 </article>
               ))
             )}
-            <div ref={messagesEndRef} />
           </div>
           <form className="composer" onSubmit={sendMessage}>
             <input
@@ -1633,8 +1656,6 @@ function VideoTile({
   isScreenShare = false,
   isSpotlight = false,
   isSelected = false,
-  onVolumeChange,
-  onLiveVolumeChange,
   onSelect,
 }: {
   stream: MediaStream | null;
@@ -1653,8 +1674,6 @@ function VideoTile({
   isScreenShare?: boolean;
   isSpotlight?: boolean;
   isSelected?: boolean;
-  onVolumeChange?: (volume: number) => void;
-  onLiveVolumeChange?: (volume: number) => void;
   onSelect?: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -1732,44 +1751,6 @@ function VideoTile({
         <span className={cameraOn ? "badge-online" : "badge-muted"}>{cameraOn ? "Cam" : "Sem cam"}</span>
       </div>
       <span className="tile-name">{label}</span>
-      {onVolumeChange || onLiveVolumeChange ? (
-        <div
-          className="volume-stack"
-          onClick={(event) => event.stopPropagation()}
-          onPointerDown={(event) => event.stopPropagation()}
-        >
-          {onVolumeChange ? (
-            <label className="volume-control">
-              <span>Voz</span>
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                value={volume}
-                onChange={(event) => onVolumeChange(Number(event.target.value))}
-                aria-label={`Volume da voz de ${label}`}
-              />
-              <b>{Math.round(volume * 100)}</b>
-            </label>
-          ) : null}
-          {onLiveVolumeChange ? (
-            <label className="volume-control">
-              <span>Live</span>
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                value={liveVolume}
-                onChange={(event) => onLiveVolumeChange(Number(event.target.value))}
-                aria-label={`Volume da live de ${label}`}
-              />
-              <b>{Math.round(liveVolume * 100)}</b>
-            </label>
-          ) : null}
-        </div>
-      ) : null}
       {active ? (
         <button
           type="button"

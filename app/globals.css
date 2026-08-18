@@ -239,13 +239,14 @@ p {
 }
 
 .voice-participant {
-  display: flex;
-  align-items: center;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: start;
   gap: 8px;
   min-width: 0;
   min-height: 28px;
   border-radius: 8px;
-  padding: 0 8px;
+  padding: 4px 8px;
   color: #c8d0d6;
 }
 
@@ -262,12 +263,47 @@ p {
   font-weight: 800;
 }
 
+.voice-participant-body {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
 .voice-participant p {
   margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 0.84rem;
+}
+
+.participant-volumes {
+  display: grid;
+  gap: 4px;
+}
+
+.participant-volumes label {
+  display: grid;
+  grid-template-columns: 28px minmax(54px, 1fr) 26px;
+  align-items: center;
+  gap: 6px;
+}
+
+.participant-volumes small,
+.participant-volumes b {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.participant-volumes input {
+  min-height: 16px;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.participant-volumes b {
+  text-align: right;
 }
 
 .call-area {
@@ -592,9 +628,11 @@ h1 {
 }
 
 .video-tile.is-spotlight {
+  width: 100%;
   min-height: min(58vh, 620px);
   aspect-ratio: 16 / 9;
   border-color: #4c5668;
+  flex: 0 0 auto;
 }
 
 .video-tile video {
@@ -686,41 +724,6 @@ h1 {
 
 .fullscreen-button:hover {
   background: rgba(88, 101, 242, 0.9);
-}
-
-.volume-stack {
-  position: absolute;
-  right: 10px;
-  bottom: 50px;
-  display: grid;
-  gap: 6px;
-  width: min(190px, calc(100% - 20px));
-}
-
-.volume-control {
-  display: grid;
-  grid-template-columns: 28px minmax(62px, 1fr) auto;
-  align-items: center;
-  gap: 7px;
-  border-radius: 8px;
-  padding: 7px 8px;
-  background: rgba(9, 11, 14, 0.72);
-  color: #fff;
-  font-size: 0.76rem;
-  font-weight: 650;
-  backdrop-filter: blur(10px);
-}
-
-.volume-control input {
-  min-height: 18px;
-  padding: 0;
-  accent-color: var(--accent);
-}
-
-.volume-control b {
-  min-width: 24px;
-  text-align: right;
-  font-size: 0.72rem;
 }
 
 .empty-tile {
