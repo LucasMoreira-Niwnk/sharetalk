@@ -84,7 +84,7 @@ const jsonHeaders = {
   "content-type": "application/json; charset=utf-8",
   "cache-control": "no-store",
 };
-const PRESENCE_TTL_MS = 6500;
+const PRESENCE_TTL_MS = 4000;
 const DEFAULT_SERVER_ID = "infernus";
 const DEFAULT_CHANNELS: Omit<ChannelRow, "server_id" | "created_at" | "updated_at">[] = [
   { id: "geral", name: "geral", type: "text", order_index: 1 },

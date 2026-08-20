@@ -26,6 +26,7 @@ type RemotePeer = {
   name: string;
   avatarUrl: string;
   connectionId: string;
+  connectionState: RTCPeerConnectionState;
   stream: MediaStream | null;
   voiceStream: MediaStream | null;
   screenAudioStream: MediaStream | null;
@@ -528,7 +529,22 @@ export default function Home() {
         if (items.some((item) => item.id === peerId)) {
           return items;
         }
-        return [...items, { id: peerId, name: peerName, avatarUrl: "", connectionId: peerConnectionId, stream: null, voiceStream: null, screenAudioStream: null, micOn: false, cameraOn: false, screenOn: false }];
+        return [
+          ...items,
+          {
+            id: peerId,
+            name: peerName,
+            avatarUrl: "",
+            connectionId: peerConnectionId,
+            connectionState: peer.connectionState,
+            stream: null,
+            voiceStream: null,
+            screenAudioStream: null,
+            micOn: false,
+            cameraOn: false,
+            screenOn: false,
+          },
+        ];
       });
 
       addLocalTracksToPeer(peer);
@@ -594,7 +610,13 @@ export default function Home() {
       };
 
       peer.onconnectionstatechange = () => {
-        if (["failed", "closed"].includes(peer.connectionState)) {
+        const nextState = peer.connectionState;
+
+        setRemotePeers((items) =>
+          items.map((item) => (item.id === peerId ? { ...item, connectionState: nextState } : item)),
+        );
+
+        if (["failed", "closed"].includes(nextState)) {
           peersRef.current.delete(peerId);
           peerConnectionIdsRef.current.delete(peerId);
           connectionRequestsRef.current.delete(peerId);
@@ -1167,6 +1189,11 @@ export default function Home() {
 
         setPresenceParticipants(result.participants);
         const onlineIds = new Set(result.participants.map((participant) => participant.clientId));
+        for (const peerId of connectionRequestsRef.current.keys()) {
+          if (!onlineIds.has(peerId)) {
+            connectionRequestsRef.current.delete(peerId);
+          }
+        }
         setRemotePeers((items) =>
           items
             .filter((peer) => onlineIds.has(peer.id))
@@ -1178,9 +1205,9 @@ export default function Home() {
                   name: presence.name,
                   avatarUrl: presence.avatarUrl,
                   micOn: presence.micOn,
-                    cameraOn: presence.cameraOn,
-                    screenOn: presence.screenOn,
-                  }
+                  cameraOn: presence.cameraOn,
+                  screenOn: presence.screenOn,
+                }
                 : peer;
             }),
         );
@@ -1683,7 +1710,8 @@ export default function Home() {
   const localVideoVisible = Boolean(screenStream || (localStream && cameraOn));
   const isConnected = Boolean(localStream);
   const connectionLabel = isConnected ? "Conectado" : "Desconectado";
-  const activeParticipants = presenceParticipants.length || (remotePeers.length + (isConnected ? 1 : 0));
+  const connectedRemotePeers = remotePeers.filter((peer) => peer.connectionState === "connected");
+  const activeParticipants = connectedRemotePeers.length + (isConnected ? 1 : 0);
   const audioInputDevices = mediaDevices.filter((device) => device.kind === "audioinput");
   const videoInputDevices = mediaDevices.filter((device) => device.kind === "videoinput");
   const audioOutputDevices = mediaDevices.filter((device) => device.kind === "audiooutput");
@@ -1709,7 +1737,7 @@ export default function Home() {
       canControlLiveVolume: false,
       isScreenShare: Boolean(screenStream),
     },
-    ...remotePeers.map((peer) => ({
+    ...connectedRemotePeers.map((peer) => ({
       id: peer.id,
       stream: peer.stream,
       voiceStream: peer.voiceStream,
@@ -1732,22 +1760,17 @@ export default function Home() {
   ];
   const spotlightTile = videoTiles.find((tile) => tile.id === spotlightId && tile.active) ?? null;
   const gridTiles = spotlightTile ? videoTiles.filter((tile) => tile.id !== spotlightTile.id) : videoTiles;
-  const voiceParticipants = presenceParticipants.length > 0
-    ? presenceParticipants.map((participant) => {
-        const peer = remotePeers.find((item) => item.id === participant.clientId);
-        return {
-          id: participant.clientId,
-          name: participant.clientId === clientId ? visibleName : participant.name,
-          avatarUrl: participant.clientId === clientId ? currentUser?.avatarUrl ?? "" : participant.avatarUrl,
-          isLocal: participant.clientId === clientId,
-          hasVoice: Boolean(peer?.voiceStream),
-          hasLive: Boolean(peer?.screenAudioStream),
-        };
-      })
-    : [
-        ...(isConnected ? [{ id: clientId || "local", name: visibleName, avatarUrl: currentUser?.avatarUrl ?? "", isLocal: true, hasVoice: false, hasLive: false }] : []),
-        ...remotePeers.map((peer) => ({ id: peer.id, name: peer.name, avatarUrl: peer.avatarUrl, isLocal: false, hasVoice: Boolean(peer.voiceStream), hasLive: Boolean(peer.screenAudioStream) })),
-      ];
+  const voiceParticipants = [
+    ...(isConnected ? [{ id: clientId || "local", name: visibleName, avatarUrl: currentUser?.avatarUrl ?? "", isLocal: true, hasVoice: false, hasLive: false }] : []),
+    ...connectedRemotePeers.map((peer) => ({
+      id: peer.id,
+      name: peer.name,
+      avatarUrl: peer.avatarUrl,
+      isLocal: false,
+      hasVoice: Boolean(peer.voiceStream),
+      hasLive: Boolean(peer.screenAudioStream),
+    })),
+  ];
 
   if (!isReady) {
     return (
