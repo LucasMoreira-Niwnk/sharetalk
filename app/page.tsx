@@ -171,6 +171,14 @@ function serverPath(serverId: string) {
   return `/servers/${encodeURIComponent(serverId)}`;
 }
 
+function getVideoSender(peer: RTCPeerConnection) {
+  const transceiver = peer.getTransceivers().find((item) =>
+    item.sender.track?.kind === "video" || item.receiver.track.kind === "video",
+  );
+
+  return transceiver?.sender ?? peer.getSenders().find((item) => item.track?.kind === "video") ?? null;
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -490,6 +498,8 @@ export default function Home() {
       peer.addTrack(screenTrack, screenStreamRef.current as MediaStream);
     } else if (cameraTrack) {
       peer.addTrack(cameraTrack, new MediaStream([cameraTrack]));
+    } else if (!getVideoSender(peer)) {
+      peer.addTransceiver("video", { direction: "sendonly" });
     }
     if (screenAudioTrack && screenStreamRef.current) {
       peer.addTrack(screenAudioTrack, screenStreamRef.current);
@@ -610,7 +620,7 @@ export default function Home() {
         return;
       }
 
-      const sender = peer.getSenders().find((item) => item.track?.kind === "video");
+      const sender = getVideoSender(peer);
       if (sender) {
         sender.replaceTrack(track).catch(() => {
           if (peer.connectionState === "closed" || peer.signalingState === "closed") {
@@ -625,7 +635,11 @@ export default function Home() {
         });
       } else if (track && localStreamRef.current) {
         try {
-          peer.addTrack(track, localStreamRef.current);
+          const transceiver = peer.addTransceiver("video", {
+            direction: "sendonly",
+            streams: [new MediaStream([track])],
+          } as RTCRtpTransceiverInit);
+          transceiver.sender.replaceTrack(track).catch(() => undefined);
           peersRef.current.forEach((candidate, id) => {
             if (candidate === peer) {
               renegotiatePeer(id, peer).catch(() => undefined);
@@ -885,8 +899,27 @@ export default function Home() {
     });
     window.sessionStorage.setItem(ACTIVE_VOICE_STORAGE_KEY, JSON.stringify({ serverId, channelId: selectedVoiceChannel }));
     await postPresence();
+    try {
+      const result = await api<{ participants: PresenceParticipant[] }>(
+        `/api/presence?roomId=${encodeURIComponent(voiceRoomKey)}`,
+      );
+      await Promise.all(result.participants
+        .filter((participant) => participant.clientId !== clientId)
+        .map((participant) => {
+          connectionRequestsRef.current.set(participant.clientId, Date.now());
+          return postSignal("join", {
+            name: name || "Amigo",
+            avatarUrl: currentUser?.avatarUrl ?? "",
+            micOn: stream.getAudioTracks().some((track) => track.enabled),
+            cameraOn: stream.getVideoTracks().some((track) => track.enabled),
+            screenOn: Boolean(screenStreamRef.current),
+          }, participant.clientId).catch(() => undefined);
+        }));
+    } catch {
+      // The broadcast join above is enough; direct joins only make connection faster.
+    }
     setStatus(`Conectado ao canal de voz ${currentVoiceChannel.name}.`);
-  }, [currentUser?.avatarUrl, currentVoiceChannel.name, ensureMedia, name, postPresence, postSignal, renegotiatePeer, selectedVoiceChannel, serverId, syncSignalCursor]);
+  }, [clientId, currentUser?.avatarUrl, currentVoiceChannel.name, ensureMedia, name, postPresence, postSignal, renegotiatePeer, selectedVoiceChannel, serverId, syncSignalCursor, voiceRoomKey]);
 
   useEffect(() => {
     if (!isReady || !clientId || localStream || autoJoinAttemptedRef.current) {
@@ -1109,7 +1142,7 @@ export default function Home() {
     }
 
     pollSignals();
-    const interval = window.setInterval(pollSignals, 1200);
+    const interval = window.setInterval(pollSignals, 800);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
@@ -1167,7 +1200,7 @@ export default function Home() {
               peer.connectionState === "disconnected";
             const lastRequest = connectionRequestsRef.current.get(participant.clientId) ?? 0;
 
-            if (needsConnection && now - lastRequest > 2500) {
+            if (needsConnection && now - lastRequest > 1000) {
               connectionRequestsRef.current.set(participant.clientId, now);
               postSignal(
                 "join",
@@ -1191,7 +1224,7 @@ export default function Home() {
     }
 
     loadPresence();
-    const interval = window.setInterval(loadPresence, 1200);
+    const interval = window.setInterval(loadPresence, 900);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
@@ -1206,7 +1239,7 @@ export default function Home() {
     postPresence().catch(() => undefined);
     const interval = window.setInterval(() => {
       postPresence().catch(() => undefined);
-    }, 2000);
+    }, 1500);
 
     return () => {
       window.clearInterval(interval);
